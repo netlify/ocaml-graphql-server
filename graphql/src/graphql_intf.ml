@@ -46,48 +46,48 @@ module type Schema = sig
             ('ctx, 'src option) typ
 
   module Arg : sig
-    type _ arg
-    type _ arg_typ
+    type (_, _) arg
+    type (_, _) arg_typ
 
     type (_, _) arg_list =
       | [] : ('a, 'a) arg_list
-      | (::) : 'a arg * ('b, 'c) arg_list -> ('b, 'a -> 'c) arg_list
+      | (::) : ('b, 'c -> 'b) arg * ('a, 'b) arg_list -> ('a, 'c -> 'b) arg_list
 
     val arg : ?doc:string ->
               string ->
-              typ:'a arg_typ ->
-              'a arg
+              typ:('a, 'b -> 'a) arg_typ ->
+              ('a, 'b -> 'a) arg
 
     val arg' : ?doc:string ->
                string ->
-               typ:'a option arg_typ ->
-               default:'a ->
-               'a arg
+               typ:('a, 'b option -> 'a) arg_typ ->
+               default:'b ->
+               ('a, 'b -> 'a) arg
 
     val scalar : ?doc:string ->
                  string ->
-                 coerce:(Graphql_parser.const_value -> ('a, string) result) ->
-                 'a option arg_typ
+                 coerce:(Graphql_parser.const_value -> ('b, string) result) ->
+                 ('a, 'b option -> 'a) arg_typ
 
     val enum : ?doc:string ->
                string ->
-               values:'a enum_value list ->
-               'a option arg_typ
+               values:'b enum_value list ->
+               ('a, 'b option -> 'a) arg_typ
 
     val obj : ?doc:string ->
               string ->
-              fields:('a, 'b) arg_list ->
+              fields:('c, 'b) arg_list ->
               coerce:'b ->
-              'a option arg_typ
+              ('a, 'c option -> 'a) arg_typ
 
     (* Argument constructors *)
-    val int : int option arg_typ
-    val string : string option arg_typ
-    val bool : bool option arg_typ
-    val float : float option arg_typ
-    val guid : string option arg_typ
-    val list : 'a arg_typ -> 'a list option arg_typ
-    val non_null : 'a option arg_typ -> 'a arg_typ
+    val int : ('a, int option -> 'a) arg_typ
+    val string : ('a, string option -> 'a) arg_typ
+    val bool : ('a, bool option -> 'a) arg_typ
+    val float : ('a, float option -> 'a) arg_typ
+    val guid : ('a, string option -> 'a) arg_typ
+    val list : ('a, 'b -> 'a) arg_typ -> ('a, 'b list option -> 'a) arg_typ
+    val non_null : ('a, 'b option -> 'a) arg_typ -> ('a, 'b -> 'a) arg_typ
   end
 
   type 'ctx resolve_params = {
@@ -125,6 +125,30 @@ module type Schema = sig
   val list : ('ctx, 'src) typ -> ('ctx, 'src list option) typ
 
   val non_null : ('ctx, 'src option) typ -> ('ctx, 'src) typ
+
+  type ('ctx, 'a) abstract_value
+  type ('ctx, 'a) abstract_typ = ('ctx, ('ctx, 'a) abstract_value option) typ
+
+  val union : ?doc:string ->
+              string ->
+              ('ctx, 'a) abstract_typ
+
+  type abstract_field
+  val abstract_field : ?doc:string ->
+                       ?deprecated:deprecated ->
+                       string ->
+                       typ:(_, 'a) typ ->
+                       args:('a, _) Arg.arg_list ->
+                       abstract_field
+
+  val interface : ?doc:string ->
+                  string ->
+                  fields:(('ctx, 'a) abstract_typ -> abstract_field list) ->
+                  ('ctx, 'a) abstract_typ
+
+  val add_type : ('ctx, 'a) abstract_typ ->
+                 ('ctx, 'src option) typ ->
+                 'src -> ('ctx, 'a) abstract_value
 
   (** {3 Built-in scalars} *)
 

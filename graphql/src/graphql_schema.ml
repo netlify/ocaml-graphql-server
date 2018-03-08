@@ -100,183 +100,183 @@ module Make(Io : IO) = struct
 
   let id : 'a. 'a -> 'a = fun x -> x
 
-  module Arg = struct
-    open Rresult
-
-    type _ arg_typ =
-      | Scalar : {
-          name   : string;
-          doc    : string option;
-          coerce : Graphql_parser.const_value -> ('a, string) result;
-        } -> 'a option arg_typ
-      | Object : {
-          name   : string;
-          doc    : string option;
-          fields : ('a, 'b) arg_list;
-          coerce : 'b;
-        } -> 'a option arg_typ
-      | Enum : {
-          name   : string;
-          doc    : string option;
-          values : 'a enum_value list;
-        } -> 'a option arg_typ
-      | List : 'a arg_typ -> 'a list option arg_typ
-      | NonNullable : 'a option arg_typ -> 'a arg_typ
-    and _ arg =
-      | Arg : {
-          name : string;
-          doc : string option;
-          typ : 'a arg_typ;
-        } -> 'a arg
-      | DefaultArg : {
-          name : string;
-          doc : string option;
-          typ : 'a option arg_typ;
-          default : 'a;
-        } -> 'a arg
-    and (_, _) arg_list =
-      | [] : ('a, 'a) arg_list
-      | (::) : 'a arg * ('b, 'c) arg_list -> ('b, 'a -> 'c) arg_list
-
-    let arg ?doc name ~typ =
-      Arg { name; doc; typ }
-
-    let arg' ?doc name ~typ ~default =
-      DefaultArg { name; doc; typ; default }
-
-    let scalar ?doc name ~coerce =
-      Scalar { name; doc; coerce }
-
-    let enum ?doc name ~values =
-      Enum { name; doc; values }
-
-    let obj ?doc name ~fields ~coerce =
-      Object { name; doc; fields; coerce }
-
-    (* Built-in argument types *)
-    let int = Scalar {
-      name = "Int";
-      doc = None;
-      coerce = function
-        | `Int n -> Ok n
-        | _ -> Error "Invalid int"
-    }
-
-    let string = Scalar {
-      name = "String";
-      doc = None;
-      coerce = function
-        | `String s -> Ok s
-        | _ -> Error "Invalid string"
-    }
-
-    let float = Scalar {
-      name = "Float";
-      doc = None;
-      coerce = function
-        | `Float f -> Ok f
-        | `Int n -> Ok (float_of_int n)
-        | _ -> Error "Invalid float"
-    }
-
-    let bool = Scalar {
-      name = "Boolean";
-      doc = None;
-      coerce = function
-        | `Bool b -> Ok b
-        | _ -> Error "Invalid boolean"
-    }
-
-    let guid = Scalar {
-      name = "ID";
-      doc = None;
-      coerce = function
-        | `String s -> Ok s
-        | `Int n -> Ok (string_of_int n)
-        | _ -> Error "Invalid ID"
-    }
-
-    let non_null typ = NonNullable typ
-    let list typ = List typ
-
-    let rec value_to_const_value variable_map = function
-    | `Null -> `Null
-    | `Int _ as i -> i
-    | `Float _ as f -> f
-    | `String _ as s -> s
-    | `Bool _ as b -> b
-    | `Enum _ as e -> e
-    | `Variable v -> StringMap.find_exn v variable_map
-    | `List xs -> `List (List.map (value_to_const_value variable_map) xs)
-    | `Assoc props ->
-        let props' = List.map (fun (name, value) -> name, value_to_const_value variable_map value) props in
-        `Assoc props'
-
-    let rec eval_arglist : type a b. variable_map -> (a, b) arg_list -> (string * Graphql_parser.value) list -> b -> (a, string) result =
-      fun variable_map arglist key_values f ->
-        match arglist with
-        | [] -> Ok f
-        | (DefaultArg arg)::arglist' ->
-            let arglist'' = (Arg { name = arg.name; doc = arg.doc; typ = arg.typ })::arglist' in
-            eval_arglist variable_map arglist'' key_values (function
-              | None -> f arg.default
-              | Some value -> f value
-            )
-        | (Arg arg)::arglist' ->
-            try
-              let value = List.assoc arg.name key_values in
-              let const_value = Option.map value ~f:(value_to_const_value variable_map) in
-              eval_arg variable_map arg.typ const_value >>= fun coerced ->
-              eval_arglist variable_map arglist' key_values (f coerced)
-            with StringMap.Missing_key key -> Error (Format.sprintf "Missing variable `%s`" key)
-
-    and eval_arg : type a. variable_map ->  a arg_typ -> Graphql_parser.const_value option -> (a, string) result = fun variable_map typ value ->
-      match (typ, value) with
-      | NonNullable _, None -> Error "Missing required argument"
-      | NonNullable _, Some `Null -> Error "Missing required argument"
-      | Scalar _, None -> Ok None
-      | Scalar _, Some `Null -> Ok None
-      | Object _, None -> Ok None
-      | Object _, Some `Null -> Ok None
-      | List _, None -> Ok None
-      | List _, Some `Null -> Ok None
-      | Enum _, None -> Ok None
-      | Enum _, Some `Null -> Ok None
-      | Scalar s, Some value ->
-          s.coerce value >>| fun coerced ->
-          Some coerced
-      | Object o, Some value ->
-          begin match value with
-          | `Assoc props ->
-              let props' = (props :> (string * Graphql_parser.value) list) in
-              eval_arglist variable_map o.fields props' o.coerce >>| fun coerced ->
-              Some coerced
-          | _ -> Error "Expected object"
-          end
-     | List typ, Some value ->
-          begin match value with
-          | `List values ->
-              let option_values = List.map (fun x -> Some x) values in
-              List.Result.all (eval_arg variable_map typ) option_values >>| fun coerced ->
-              Some coerced
-          | value -> eval_arg variable_map typ (Some value) >>| fun coerced ->
-              (Some [coerced] : a)
-          end
-      | NonNullable typ, value ->
-          eval_arg variable_map typ value >>= (function
-          | Some value -> Ok value
-          | None -> Error "Missing required argument")
-      | Enum e, Some value ->
-          begin match value with
-          | `Enum v
-          | `String v ->
-              begin match List.find (fun enum_value -> enum_value.name = v) e.values with
-              | Some enum_value -> Ok (Some enum_value.value)
-              | None -> Error "Invalid enum value"
-              end
-          | _ -> Error "Expected enum"
-          end
-  end
+     module Arg = struct
+     open Rresult
+ 
+     type (_, _) arg_typ =
+       | Scalar : {
+           name   : string;
+           doc    : string option;
+           coerce : Graphql_parser.const_value -> ('b, string) result;
+         } -> ('a, 'b option -> 'a) arg_typ
+       | Object : {
+           name   : string;
+           doc    : string option;
+           fields : ('a, 'b) arg_list;
+           coerce : 'b;
+         } -> ('c, 'a option -> 'c) arg_typ
+       | Enum : {
+           name   : string;
+           doc    : string option;
+           values : 'b enum_value list;
+         } -> ('a, 'b option -> 'a) arg_typ
+       | List : ('a, 'b -> 'a) arg_typ -> ('a, 'b list option -> 'a) arg_typ
+       | NonNullable : ('a, 'b option -> 'a) arg_typ -> ('a, 'b -> 'a) arg_typ
+     and ('a, 'b) arg =
+       | Arg : {
+           name : string;
+           doc : string option;
+           typ : ('a, 'b) arg_typ;
+         } -> ('a, 'b) arg
+       | DefaultArg : {
+           name : string;
+           doc : string option;
+           typ : ('a, 'b option -> 'a) arg_typ;
+           default : 'b;
+         } -> ('a, 'b -> 'a) arg
+     and (_, _) arg_list =
+       | [] : ('a, 'a) arg_list
+       | (::) : ('b, 'c -> 'b) arg * ('a, 'b) arg_list -> ('a, 'c -> 'b) arg_list
+ 
+     let arg ?doc name ~typ =
+       Arg { name; doc; typ }
+ 
+     let arg' ?doc name ~typ ~default =
+       DefaultArg { name; doc; typ; default }
+ 
+     let scalar ?doc name ~coerce =
+       Scalar { name; doc; coerce }
+ 
+     let enum ?doc name ~values =
+       Enum { name; doc; values }
+ 
+     let obj ?doc name ~fields ~coerce =
+       Object { name; doc; fields; coerce }
+ 
+     (* Built-in argument types *)
+     let int = Scalar {
+       name = "Int";
+       doc = None;
+       coerce = function
+         | `Int n -> Ok n
+         | _ -> Error "Invalid int"
+     }
+ 
+     let string = Scalar {
+       name = "String";
+       doc = None;
+       coerce = function
+         | `String s -> Ok s
+         | _ -> Error "Invalid string"
+     }
+ 
+     let float = Scalar {
+       name = "Float";
+       doc = None;
+       coerce = function
+         | `Float f -> Ok f
+         | `Int n -> Ok (float_of_int n)
+         | _ -> Error "Invalid float"
+     }
+ 
+     let bool = Scalar {
+       name = "Boolean";
+       doc = None;
+       coerce = function
+         | `Bool b -> Ok b
+         | _ -> Error "Invalid boolean"
+     }
+ 
+     let guid = Scalar {
+       name = "ID";
+       doc = None;
+       coerce = function
+         | `String s -> Ok s
+         | `Int n -> Ok (string_of_int n)
+         | _ -> Error "Invalid ID"
+     }
+ 
+     let non_null typ = NonNullable typ
+     let list typ = List typ
+ 
+     let rec value_to_const_value variable_map = function
+     | `Null -> `Null
+     | `Int _ as i -> i
+     | `Float _ as f -> f
+     | `String _ as s -> s
+     | `Bool _ as b -> b
+     | `Enum _ as e -> e
+     | `Variable v -> StringMap.find_exn v variable_map
+     | `List xs -> `List (List.map (value_to_const_value variable_map) xs)
+     | `Assoc props ->
+         let props' = List.map (fun (name, value) -> name, value_to_const_value variable_map value) props in
+         `Assoc props'
+ 
+     let rec eval_arglist : type a b. variable_map -> (a, b) arg_list -> (string * Graphql_parser.value) list -> b -> (a, string) result =
+       fun variable_map arglist key_values f ->
+         match arglist with
+         | [] -> Ok f
+         | (DefaultArg arg)::arglist' ->
+             let arglist'' = (Arg { name = arg.name; doc = arg.doc; typ = arg.typ })::arglist' in
+             eval_arglist variable_map arglist'' key_values (function
+               | None -> f arg.default
+               | Some value -> f value
+             )
+         | (Arg arg)::arglist' ->
+             try
+               let value = List.assoc arg.name key_values in
+               let const_value = Option.map value ~f:(value_to_const_value variable_map) in
+               eval_arg variable_map arg.typ const_value >>= fun coerced ->
+               eval_arglist variable_map arglist' key_values (f coerced)
+             with StringMap.Missing_key key -> Error (Format.sprintf "Missing variable `%s`" key)
+ 
+     and eval_arg : type a b. variable_map -> (a, b -> a) arg_typ -> Graphql_parser.const_value option -> (b, string) result = fun variable_map typ value ->
+       match (typ, value) with
+       | NonNullable _, None -> Error "Missing required argument"
+       | NonNullable _, Some `Null -> Error "Missing required argument"
+       | Scalar _, None -> Ok None
+       | Scalar _, Some `Null -> Ok None
+       | Object _, None -> Ok None
+       | Object _, Some `Null -> Ok None
+       | List _, None -> Ok None
+       | List _, Some `Null -> Ok None
+       | Enum _, None -> Ok None
+       | Enum _, Some `Null -> Ok None
+       | Scalar s, Some value ->
+           s.coerce value >>| fun coerced ->
+           Some coerced
+       | Object o, Some value ->
+           begin match value with
+           | `Assoc props ->
+               let props' = (props :> (string * Graphql_parser.value) list) in
+               eval_arglist variable_map o.fields props' o.coerce >>| fun coerced ->
+               Some coerced
+           | _ -> Error "Expected object"
+           end
+      | List typ, Some value ->
+           begin match value with
+           | `List values ->
+               let option_values = List.map (fun x -> Some x) values in
+               List.Result.all (eval_arg variable_map typ) option_values >>| fun coerced ->
+               Some coerced
+           | value -> eval_arg variable_map typ (Some value) >>| fun coerced ->
+               (Some [coerced] : b)
+           end
+       | NonNullable typ, value ->
+           eval_arg variable_map typ value >>= (function
+           | Some value -> Ok value
+           | None -> Error "Missing required argument")
+       | Enum e, Some value ->
+           begin match value with
+           | `Enum v
+           | `String v ->
+               begin match List.find (fun enum_value -> enum_value.name = v) e.values with
+               | Some enum_value -> Ok (Some enum_value.value)
+               | None -> Error "Invalid enum value"
+               end
+           | _ -> Error "Expected enum"
+           end
+     end
 
   (* Schema data types *)
   type 'a scalar = {
@@ -301,6 +301,7 @@ module Make(Io : IO) = struct
     name   : string;
     doc    : string option;
     fields : ('ctx, 'src) field list Lazy.t;
+    interfaces : abstract list ref;
   }
   and (_, _) field =
     Field : {
@@ -318,6 +319,22 @@ module Make(Io : IO) = struct
     | NonNullable : ('ctx, 'src option) typ -> ('ctx, 'src) typ
     | Scalar      : 'src scalar -> ('ctx, 'src option) typ
     | Enum        : 'src enum -> ('ctx, 'src option) typ
+    | Abstract    : abstract -> ('ctx, ('ctx, 'a) abstract_value option) typ
+  and any_typ =
+    | AnyTyp : (_, _) typ -> any_typ
+    | AnyArgTyp : (_, _) Arg.arg_typ -> any_typ
+  and abstract = {
+    name   : string;
+    doc    : string option;
+    kind   : [`Union | `Interface of abstract_field list Lazy.t];
+    mutable types  : any_typ list;
+  }
+  and abstract_field =
+    AbstractField : (_, _) field -> abstract_field
+  and ('ctx, 'a) abstract_value =
+    AbstractValue : ('ctx, 'src option) typ * 'src -> ('ctx, 'a) abstract_value
+
+  type ('ctx, 'a) abstract_typ = ('ctx, ('ctx, 'a) abstract_value option) typ
 
   type 'ctx schema = {
     query : ('ctx, unit) obj;
@@ -328,12 +345,14 @@ module Make(Io : IO) = struct
     query = {
       name = query_name;
       doc = None;
+      interfaces = ref [];
       fields = lazy fields;
     };
     mutation = Option.map mutations ~f:(fun fields ->
       {
         name = mutation_name;
         doc = None;
+        interfaces = ref [];
         fields = lazy fields;
       }
     )
@@ -341,7 +360,7 @@ module Make(Io : IO) = struct
 
   (* Constructor functions *)
   let obj ?doc name ~fields =
-    let rec o = Object { name; doc; fields = lazy (fields o)} in
+    let rec o = Object { name; doc; fields = lazy (fields o); interfaces = ref []} in
     o
 
   let field ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
@@ -349,6 +368,9 @@ module Make(Io : IO) = struct
 
   let io_field ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
     Field { lift = id; name; doc; deprecated; typ; args; resolve }
+
+  let abstract_field ?doc ?(deprecated=NotDeprecated) name ~typ ~args =
+    AbstractField (Field { lift = Io.return; name; doc; deprecated; typ; args; resolve = Obj.magic () })
 
   let enum ?doc name ~values =
     Enum { name; doc; values }
@@ -361,6 +383,23 @@ module Make(Io : IO) = struct
 
   let non_null typ =
     NonNullable typ
+
+  let union ?doc name =
+    Abstract { name; doc; types = []; kind = `Union }
+
+  let interface ?doc name ~fields =
+    let rec i = Abstract { name; doc; types = []; kind = `Interface (lazy (fields i)) } in
+    i
+
+  let add_type abstract_typ typ =
+    match abstract_typ with
+    | Abstract a ->
+        (* TODO add subtype check here *)
+        a.types <- (AnyTyp typ)::a.types;
+        fun src ->
+          AbstractValue (typ, src)
+    | _ ->
+        invalid_arg "The first argument must be a union or interface"
 
   (* Built-in scalars *)
   let int : 'ctx. ('ctx, int option) typ = Scalar {
@@ -395,9 +434,6 @@ module Make(Io : IO) = struct
 
 module Introspection = struct
   (* any_typ, any_field and any_arg hide type parameters to avoid scope escaping errors *)
-  type any_typ =
-    | AnyTyp : (_, _) typ -> any_typ
-    | AnyArgTyp : _ Arg.arg_typ -> any_typ
   type any_field =
     | AnyField : (_, _) field -> any_field
     | AnyArgField : _ Arg.arg -> any_field
@@ -411,7 +447,7 @@ module Introspection = struct
       f (result, visited)
 
   (* Extracts all types contained in a single type *)
-  let rec types : type src. ?memo:(any_typ list * StringSet.t) -> ('ctx, src) typ -> (any_typ list * StringSet.t) = fun ?(memo=([], StringSet.empty)) typ ->
+  let rec types : type ctx src. ?memo:(any_typ list * StringSet.t) -> (ctx, src) typ -> (any_typ list * StringSet.t) = fun ?(memo=([], StringSet.empty)) typ ->
     match typ with
     | List typ -> types ~memo typ
     | NonNullable typ -> types ~memo typ
@@ -433,7 +469,13 @@ module Introspection = struct
           in
           List.fold_left reducer (result', visited') (Lazy.force o.fields)
         )
-  and arg_types : type a. (any_typ list * StringSet.t) -> a Arg.arg_typ -> (any_typ list * StringSet.t) = fun memo argtyp ->
+     | Abstract a as abstract ->
+        unless_visited memo a.name (fun (result, visited) ->
+          let result' = (AnyTyp abstract)::result in
+          let visited' = StringSet.add a.name visited in
+          List.fold_left (fun memo (AnyTyp typ) -> types ~memo typ) (result', visited') a.types
+        )
+  and arg_types : type a b. (any_typ list * StringSet.t) -> (a, b) Arg.arg_typ -> (any_typ list * StringSet.t) = fun memo argtyp ->
     match argtyp with
     | Arg.List typ -> arg_types memo typ
     | Arg.NonNullable typ -> arg_types memo typ
@@ -468,6 +510,8 @@ module Introspection = struct
     | arg::args ->
         let memo' = List.cons (AnyArg arg) memo in
         args_to_list ~memo:memo' args
+
+  let no_interfaces = ref []
 
   let __type_kind = Enum {
     name = "__TypeKind";
@@ -527,6 +571,7 @@ module Introspection = struct
   let __enum_value : 'ctx. ('ctx, any_enum_value option) typ = Object {
     name = "__EnumValue";
     doc = None;
+    interfaces = no_interfaces;
     fields = lazy [
       Field {
         name = "name";
@@ -573,6 +618,7 @@ module Introspection = struct
   let rec __input_value : 'ctx. ('ctx, any_arg option) typ = Object {
     name = "__InputValue";
     doc = None;
+    interfaces = no_interfaces;
     fields = lazy [
       Field {
         name = "name";
@@ -622,6 +668,7 @@ module Introspection = struct
   and __type : 'ctx . ('ctx, any_typ option) typ = Object {
     name = "__Type";
     doc = None;
+    interfaces = no_interfaces;
     fields = lazy [
       Field {
         name = "kind";
@@ -632,6 +679,8 @@ module Introspection = struct
         lift = Io.return;
         resolve = fun _ t -> match t with
           | AnyTyp (Object _) -> `Object
+          | AnyTyp (Abstract { kind = `Union; _ }) -> `Union
+          | AnyTyp (Abstract { kind = `Interface _; _ }) -> `Interface
           | AnyTyp (List _) -> `List
           | AnyTyp (Scalar _) -> `Scalar
           | AnyTyp (Enum _) -> `Enum
@@ -653,6 +702,7 @@ module Introspection = struct
           | AnyTyp (Object o) -> Some o.name
           | AnyTyp (Scalar s) -> Some s.name
           | AnyTyp (Enum e) -> Some e.name
+          | AnyTyp (Abstract a) -> Some a.name
           | AnyArgTyp (Arg.Object o) -> Some o.name
           | AnyArgTyp (Arg.Scalar s) -> Some s.name
           | AnyArgTyp (Arg.Enum e) -> Some e.name
@@ -669,6 +719,7 @@ module Introspection = struct
           | AnyTyp (Object o) -> o.doc
           | AnyTyp (Scalar s) -> s.doc
           | AnyTyp (Enum e) -> e.doc
+          | AnyTyp (Abstract a) -> a.doc
           | AnyArgTyp (Arg.Object o) -> o.doc
           | AnyArgTyp (Arg.Scalar s) -> s.doc
           | AnyArgTyp (Arg.Enum e) -> e.doc
@@ -684,6 +735,8 @@ module Introspection = struct
         resolve = fun _ t -> match t with
           | AnyTyp (Object o) ->
               Some (List.map (fun f -> AnyField f) (Lazy.force o.fields))
+          | AnyTyp (Abstract { kind = `Interface fields; _ }) ->
+              Some (List.map (fun (AbstractField f) -> AnyField f) (Lazy.force fields))
           | AnyArgTyp (Arg.Object o) ->
               let arg_list = args_to_list o.fields in
               Some (List.map (fun (AnyArg f) -> AnyArgField f) arg_list)
@@ -693,21 +746,25 @@ module Introspection = struct
         name = "interfaces";
         doc = None;
         deprecated = NotDeprecated;
-        typ = List __type;
+        typ = List (NonNullable __type);
         args = Arg.[];
         lift = Io.return;
         resolve = fun _ t -> match t with
-          | AnyTyp (Object _) -> Some []
+          | AnyTyp (Object i) ->
+              Some (List.map (fun i -> AnyTyp (Abstract i)) !(i.interfaces))
           | _ -> None
       };
       Field {
         name = "possibleTypes";
         doc = None;
         deprecated = NotDeprecated;
-        typ = List __type;
+        typ = List (NonNullable __type);
         args = Arg.[];
         lift = Io.return;
-        resolve = fun _ t -> None
+        resolve = fun _ t -> match t with
+          | AnyTyp (Abstract a) ->
+              Some a.types
+          | _ -> None
       };
       Field {
         name = "ofType";
@@ -753,6 +810,7 @@ module Introspection = struct
   and __field : 'ctx. ('ctx, any_field option) typ = Object {
     name = "__Field";
     doc = None;
+    interfaces = no_interfaces;
     fields = lazy [
       Field {
         name = "name";
@@ -829,6 +887,7 @@ module Introspection = struct
   let __directive = Object {
     name = "__Directive";
     doc = None;
+    interfaces = no_interfaces;
     fields = lazy [
       Field {
         name = "name";
@@ -845,6 +904,7 @@ module Introspection = struct
   let __schema : 'ctx. ('ctx, 'ctx schema option) typ = Object {
     name = "__Schema";
     doc = None;
+    interfaces = no_interfaces;
     fields = lazy [
       Field {
         name = "types";
@@ -953,7 +1013,7 @@ end
     | Serial -> Io.map_s f xs
     | Parallel -> Io.map_p f xs
 
-  let rec present : type src. 'ctx execution_context -> src -> Graphql_parser.field -> ('ctx, src) typ -> (Yojson.Basic.json, string) result Io.t = fun ctx src query_field typ ->
+  let rec present : type ctx src. ctx execution_context -> src -> Graphql_parser.field -> (ctx, src) typ -> (Yojson.Basic.json, string) result Io.t = fun ctx src query_field typ ->
     match typ with
     | Scalar s -> coerce_or_null src (fun x -> Io.return (Ok (s.coerce x)))
     | List t ->
@@ -975,8 +1035,12 @@ end
           | Some enum_value -> Io.ok (`String enum_value.name)
           | None -> Io.ok `Null
         )
+    | Abstract u ->
+        coerce_or_null src (fun (AbstractValue (typ', src')) ->
+          present ctx (Some src') query_field typ'
+        )
 
-  and resolve_field : type src. 'ctx execution_context -> src -> Graphql_parser.field -> ('ctx, src) field -> ((string * Yojson.Basic.json), string) result Io.t = fun ctx src query_field (Field field) ->
+  and resolve_field : type ctx src. ctx execution_context -> src -> Graphql_parser.field -> (ctx, src) field -> ((string * Yojson.Basic.json), string) result Io.t = fun ctx src query_field (Field field) ->
     let open Io.Infix in
     let name = alias_or_name query_field in
     let resolve_params = {
@@ -992,7 +1056,7 @@ end
         present ctx resolved query_field field.typ >>|? fun value ->
         name, value
 
-  and resolve_fields : type src. 'ctx execution_context -> ?execution_order:execution_order -> src -> ('ctx, src) obj -> Graphql_parser.field list -> (Yojson.Basic.json, string) result Io.t = fun ctx ?execution_order:(execution_order=Parallel) src obj fields ->
+  and resolve_fields : type ctx src. ctx execution_context -> ?execution_order:execution_order -> src -> (ctx, src) obj -> Graphql_parser.field list -> (Yojson.Basic.json, string) result Io.t = fun ctx ?execution_order:(execution_order=Parallel) src obj fields ->
     map execution_order (fun (query_field : Graphql_parser.field) ->
       if query_field.name = "__typename" then
         Io.ok (alias_or_name query_field, `String obj.name)
