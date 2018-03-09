@@ -103,40 +103,40 @@ module Make(Io : IO) = struct
      module Arg = struct
      open Rresult
  
-     type (_, _) arg_typ =
+     type _ arg_typ =
        | Scalar : {
-           name   : string;
-           doc    : string option;
-           coerce : Graphql_parser.const_value -> ('b, string) result;
-         } -> ('a, 'b option -> 'a) arg_typ
+         name   : string;
+         doc    : string option;
+         coerce : Graphql_parser.const_value -> ('a, string) result;
+       } -> 'a option arg_typ
        | Object : {
-           name   : string;
-           doc    : string option;
-           fields : ('a, 'b) arg_list;
-           coerce : 'b;
-         } -> ('c, 'a option -> 'c) arg_typ
+         name   : string;
+         doc    : string option;
+         fields : ('a, 'b) arg_list;
+         coerce : 'b;
+       } -> 'a option arg_typ
        | Enum : {
-           name   : string;
-           doc    : string option;
-           values : 'b enum_value list;
-         } -> ('a, 'b option -> 'a) arg_typ
-       | List : ('a, 'b -> 'a) arg_typ -> ('a, 'b list option -> 'a) arg_typ
-       | NonNullable : ('a, 'b option -> 'a) arg_typ -> ('a, 'b -> 'a) arg_typ
-     and ('a, 'b) arg =
-       | Arg : {
-           name : string;
-           doc : string option;
-           typ : ('a, 'b) arg_typ;
-         } -> ('a, 'b) arg
-       | DefaultArg : {
-           name : string;
-           doc : string option;
-           typ : ('a, 'b option -> 'a) arg_typ;
-           default : 'b;
-         } -> ('a, 'b -> 'a) arg
-     and (_, _) arg_list =
-       | [] : ('a, 'a) arg_list
-       | (::) : ('b, 'c -> 'b) arg * ('a, 'b) arg_list -> ('a, 'c -> 'b) arg_list
+         name   : string;
+         doc    : string option;
+         values : 'a enum_value list;
+       } -> 'a option arg_typ
+       | List : 'a arg_typ -> 'a list option arg_typ
+       | NonNullable : 'a option arg_typ -> 'a arg_typ
+      and _ arg =
+        | Arg : {
+          name : string;
+          doc : string option;
+          typ : 'a arg_typ;
+        } -> 'a arg
+        | DefaultArg : {
+          name : string;
+          doc : string option;
+          typ : 'a option arg_typ;
+          default : 'a;
+        } -> 'a arg
+      and (_, _) arg_list =
+        | [] : ('a, 'a) arg_list
+        | (::) : 'a arg * ('b, 'c) arg_list -> ('b, 'a -> 'c) arg_list
  
      let arg ?doc name ~typ =
        Arg { name; doc; typ }
@@ -230,52 +230,52 @@ module Make(Io : IO) = struct
                eval_arglist variable_map arglist' key_values (f coerced)
              with StringMap.Missing_key key -> Error (Format.sprintf "Missing variable `%s`" key)
  
-     and eval_arg : type a b. variable_map -> (a, b -> a) arg_typ -> Graphql_parser.const_value option -> (b, string) result = fun variable_map typ value ->
-       match (typ, value) with
-       | NonNullable _, None -> Error "Missing required argument"
-       | NonNullable _, Some `Null -> Error "Missing required argument"
-       | Scalar _, None -> Ok None
-       | Scalar _, Some `Null -> Ok None
-       | Object _, None -> Ok None
-       | Object _, Some `Null -> Ok None
-       | List _, None -> Ok None
-       | List _, Some `Null -> Ok None
-       | Enum _, None -> Ok None
-       | Enum _, Some `Null -> Ok None
-       | Scalar s, Some value ->
-           s.coerce value >>| fun coerced ->
-           Some coerced
-       | Object o, Some value ->
-           begin match value with
-           | `Assoc props ->
-               let props' = (props :> (string * Graphql_parser.value) list) in
-               eval_arglist variable_map o.fields props' o.coerce >>| fun coerced ->
-               Some coerced
-           | _ -> Error "Expected object"
-           end
-      | List typ, Some value ->
-           begin match value with
-           | `List values ->
-               let option_values = List.map (fun x -> Some x) values in
-               List.Result.all (eval_arg variable_map typ) option_values >>| fun coerced ->
-               Some coerced
-           | value -> eval_arg variable_map typ (Some value) >>| fun coerced ->
-               (Some [coerced] : b)
-           end
-       | NonNullable typ, value ->
-           eval_arg variable_map typ value >>= (function
-           | Some value -> Ok value
-           | None -> Error "Missing required argument")
-       | Enum e, Some value ->
-           begin match value with
-           | `Enum v
-           | `String v ->
-               begin match List.find (fun enum_value -> enum_value.name = v) e.values with
-               | Some enum_value -> Ok (Some enum_value.value)
-               | None -> Error "Invalid enum value"
-               end
-           | _ -> Error "Expected enum"
-           end
+    and eval_arg : type a. variable_map ->  a arg_typ -> Graphql_parser.const_value option -> (a, string) result = fun variable_map typ value ->
+      match (typ, value) with
+      | NonNullable _, None -> Error "Missing required argument"
+      | NonNullable _, Some `Null -> Error "Missing required argument"
+      | Scalar _, None -> Ok None
+      | Scalar _, Some `Null -> Ok None
+      | Object _, None -> Ok None
+      | Object _, Some `Null -> Ok None
+      | List _, None -> Ok None
+      | List _, Some `Null -> Ok None
+      | Enum _, None -> Ok None
+      | Enum _, Some `Null -> Ok None
+      | Scalar s, Some value ->
+          s.coerce value >>| fun coerced ->
+          Some coerced
+      | Object o, Some value ->
+          begin match value with
+          | `Assoc props ->
+              let props' = (props :> (string * Graphql_parser.value) list) in
+              eval_arglist variable_map o.fields props' o.coerce >>| fun coerced ->
+              Some coerced
+          | _ -> Error "Expected object"
+          end
+     | List typ, Some value ->
+          begin match value with
+          | `List values ->
+              let option_values = List.map (fun x -> Some x) values in
+              List.Result.all (eval_arg variable_map typ) option_values >>| fun coerced ->
+              Some coerced
+          | value -> eval_arg variable_map typ (Some value) >>| fun coerced ->
+              (Some [coerced] : a)
+          end
+      | NonNullable typ, value ->
+          eval_arg variable_map typ value >>= (function
+          | Some value -> Ok value
+          | None -> Error "Missing required argument")
+      | Enum e, Some value ->
+          begin match value with
+          | `Enum v
+          | `String v ->
+              begin match List.find (fun enum_value -> enum_value.name = v) e.values with
+              | Some enum_value -> Ok (Some enum_value.value)
+              | None -> Error "Invalid enum value"
+              end
+          | _ -> Error "Expected enum"
+end
      end
 
   (* Schema data types *)
@@ -322,7 +322,7 @@ module Make(Io : IO) = struct
     | Abstract    : abstract -> ('ctx, ('ctx, 'a) abstract_value option) typ
   and any_typ =
     | AnyTyp : (_, _) typ -> any_typ
-    | AnyArgTyp : (_, _) Arg.arg_typ -> any_typ
+    | AnyArgTyp : _ Arg.arg_typ -> any_typ
   and abstract = {
     name   : string;
     doc    : string option;
@@ -475,7 +475,7 @@ module Introspection = struct
           let visited' = StringSet.add a.name visited in
           List.fold_left (fun memo (AnyTyp typ) -> types ~memo typ) (result', visited') a.types
         )
-  and arg_types : type a b. (any_typ list * StringSet.t) -> (a, b) Arg.arg_typ -> (any_typ list * StringSet.t) = fun memo argtyp ->
+ and arg_types : type a. (any_typ list * StringSet.t) -> a Arg.arg_typ -> (any_typ list * StringSet.t) = fun memo argtyp ->
     match argtyp with
     | Arg.List typ -> arg_types memo typ
     | Arg.NonNullable typ -> arg_types memo typ
