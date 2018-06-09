@@ -2,6 +2,12 @@
 
 (library
  ((name graphql_parser)
+  (flags
+    (:standard
+      -w -27
+      -w -32
+      -warn-error -30-33-27-39-8-26
+    ))
   (public_name graphql_parser)
   (wrapped false)
   (preprocess (pps (ppx_sexp_conv)))
