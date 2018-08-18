@@ -241,6 +241,7 @@ module Make (Io : IO) (Stream: Stream with type 'a io = 'a Io.t) = struct
                eval_arglist variable_map arglist' key_values (f coerced)
              with StringMap.Missing_key key -> Error (Format.sprintf "Missing variable `%s`" key)
 
+    and eval_arg : type a. variable_map -> a arg_typ -> Graphql_parser.const_value option -> (a, string) result = fun variable_map typ value ->
       match (typ, value) with
       | NonNullable _, None -> Error "Missing required argument"
       | NonNullable _, Some `Null -> Error "Missing required argument"
@@ -351,7 +352,7 @@ end
       deprecated : deprecated;
       typ        : ('ctx, 'out) typ;
       args       : (('out stream, string) result io, 'args) Arg.arg_list;
-      resolve    : 'ctx -> 'args;
+      resolve    : 'ctx resolve_params -> 'args;
     } -> 'ctx subscription_field
 
   type 'ctx subscription_obj = {
@@ -1227,7 +1228,13 @@ end
   =
     fun ctx (SubscriptionField subs_field) field ->
       let open Io.Infix in
-      let resolver = subs_field.resolve ctx.ctx in
+      let resolve_params = {
+        ctx = ctx.ctx;
+        field = field;
+        variables = ctx.variables
+      } in
+
+      let resolver = subs_field.resolve resolve_params in
       match Arg.eval_arglist ctx.variables subs_field.args field.arguments resolver with
       | Ok result ->
           result

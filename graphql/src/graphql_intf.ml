@@ -123,7 +123,7 @@ module type Schema = sig
                            string ->
                            typ:('ctx, 'out) typ ->
                            args:(('out stream, string) result io, 'args) Arg.arg_list ->
-                           resolve:('ctx -> 'args) ->
+                           resolve:('ctx resolve_params -> 'args) ->
                            'ctx subscription_field
 
   val enum : ?doc:string ->
