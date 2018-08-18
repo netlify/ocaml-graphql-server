@@ -94,57 +94,162 @@ let suite = [
   ("dog as pet", `Quick, fun () ->
     let query = "{ pet(type: \"DOG\") { ... on Dog { name puppies } } }" in
     test_query query (`Assoc [
-			"data", `Assoc [
-				"pet", `Assoc [
-					"name", `String "Fido";
-					"puppies", `Int 2
-				]
-			]
-		])
+      "data", `Assoc [
+        "pet", `Assoc [
+          "name", `String "Fido";
+          "puppies", `Int 2
+        ]
+      ]
+    ])
   );
   ("cat as pet", `Quick, fun () ->
     let query = "{ pet(type: \"CAT\") { ... on Cat { name kittens } } }" in
     test_query query (`Assoc [
-			"data", `Assoc [
-				"pet", `Assoc [
-					"name", `String "Meow";
-					"kittens", `Int 1
-				]
-			]
-		])
+      "data", `Assoc [
+        "pet", `Assoc [
+          "name", `String "Meow";
+          "kittens", `Int 1
+        ]
+      ]
+    ])
   );
   ("pets", `Quick, fun () ->
     let query = "{ pets { ... on Dog { name puppies } ... on Cat { name kittens } } }" in
     test_query query (`Assoc [
-			"data", `Assoc [
-				"pets", `List [
-					`Assoc [
-						"name", `String "Meow";
-						"kittens", `Int 1
-					];
-					`Assoc [
-						"name", `String "Fido";
-						"puppies", `Int 2
-					]
-				]
-			]
-		])
+      "data", `Assoc [
+        "pets", `List [
+          `Assoc [
+            "name", `String "Meow";
+            "kittens", `Int 1
+          ];
+          `Assoc [
+            "name", `String "Fido";
+            "puppies", `Int 2
+          ]
+        ]
+      ]
+    ])
   );
   ("named_objects", `Quick, fun () ->
     let query = "{ named_objects { name ... on Dog { puppies } ... on Cat { kittens } } }" in
     test_query query (`Assoc [
-			"data", `Assoc [
-				"named_objects", `List [
-					`Assoc [
-						"name", `String "Meow";
-						"kittens", `Int 1
-					];
-					`Assoc [
-						"name", `String "Fido";
-						"puppies", `Int 2
-					]
-				]
-			]
-		])
+      "data", `Assoc [
+        "named_objects", `List [
+          `Assoc [
+            "name", `String "Meow";
+            "kittens", `Int 1
+          ];
+          `Assoc [
+            "name", `String "Fido";
+            "puppies", `Int 2
+          ]
+        ]
+      ]
+    ])
+  );
+  ("nested fragments with union and interface", `Quick, fun () ->
+      let query = "fragment NamedFragment on Named { ... on Dog { name } ... on Cat { name } } fragment PetFragment on Pet { ... NamedFragment ... on Dog { puppies } ... on Cat { kittens } } { pets { ... PetFragment } }" in
+    test_query query (`Assoc [
+      "data", `Assoc [
+        "pets", `List [
+          `Assoc [
+            "name", `String "Meow";
+            "kittens", `Int 1
+          ];
+          `Assoc [
+            "name", `String "Fido";
+            "puppies", `Int 2
+          ]
+        ]
+      ]
+    ])
+  );
+  ("introspection", `Quick, fun () ->
+      let query = "{ __schema { types { name kind possibleTypes { name kind } interfaces { name kind } } } }" in
+      test_query query (`Assoc [
+        "data", `Assoc [
+          "__schema", `Assoc [
+            "types", `List [
+              `Assoc [
+                "name", `String "Named";
+                "kind", `String "INTERFACE";
+                "possibleTypes", `List [
+                  `Assoc [
+                    "name", `String "Dog";
+                    "kind", `String "OBJECT"
+                  ];
+                  `Assoc [
+                    "name", `String "Cat";
+                    "kind", `String "OBJECT"
+                  ]
+                ];
+                "interfaces", `Null
+              ];
+              `Assoc [
+                "name", `String "pet_type";
+                "kind", `String "ENUM";
+                "possibleTypes", `Null;
+                "interfaces", `Null
+               ];
+              `Assoc [
+                "name", `String "Cat";
+                "kind", `String "OBJECT";
+                "possibleTypes", `Null;
+                "interfaces", `List [
+                  `Assoc [
+                    "name", `String "Named";
+                    "kind", `String "INTERFACE"
+                  ]
+                ]
+              ];
+              `Assoc [
+                "name", `String "Int";
+                "kind", `String "SCALAR";
+                "possibleTypes", `Null;
+                "interfaces", `Null
+              ];
+              `Assoc [
+                "name", `String "String";
+                "kind", `String "SCALAR";
+                "possibleTypes", `Null;
+                "interfaces", `Null
+              ];
+              `Assoc [
+                "name", `String "Dog";
+                "kind", `String "OBJECT";
+                "possibleTypes", `Null;
+                "interfaces", `List [
+                  `Assoc [
+                    "name", `String "Named";
+                    "kind", `String "INTERFACE"
+                  ]
+                ]
+              ];
+              `Assoc [
+                "name", `String "Pet";
+                "kind", `String "UNION";
+                "possibleTypes", `List [
+                  `Assoc [
+                    "name", `String "Dog";
+                    "kind", `String "OBJECT"
+                  ];
+                  `Assoc [
+                    "name", `String "Cat";
+                    "kind", `String "OBJECT"
+                  ]
+                ];
+                "interfaces", `Null
+              ];
+              `Assoc [
+                "name", `String "query";
+                "kind", `String "OBJECT";
+                "possibleTypes", `Null;
+                "interfaces", `List []
+              ]
+            ]
+          ]
+        ]
+      ]
+    )
   );
 ]

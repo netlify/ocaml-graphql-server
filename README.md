@@ -41,14 +41,14 @@ To run a sample GraphQL server also serving GraphiQL, do the following:
 
 ```bash
 opam install graphql-lwt jbuilder
-git checkout git@github.com/andreas/ocaml-graphql-server.git
+git clone git@github.com:andreas/ocaml-graphql-server.git
 cd ocaml-graphql-server
 cd examples
 jbuilder build server.exe
 ./_build/default/server.exe
 ```
 
-Now open [http://localhost:8080](http://localhost:8080).
+Now open [http://localhost:8080/graphql](http://localhost:8080/graphql).
 
 ### Defining a Schema
 
@@ -109,17 +109,21 @@ let schema = Schema.(schema [
 Without variables:
 
 ```ocaml
-let query = Graphql_parser.parse "{ users { name } }" in
-Graphql.Schema.execute schema ctx query
+match Graphql_parser.parse "{ users { name } }" with
+| Ok query -> Graphql.Schema.execute schema ctx query
+| Error err -> failwith err
 ```
 
 With variables parsed from JSON:
 
 ```ocaml
-let query = Graphql_parser.parse "{ users(limit: $x) { name } }" in
-let json_variables = Yojson.Basic.(from_string "{\"x\": 42}" |> Util.to_assoc) in
-let variables = (json_variables :> (string * Graphql_parser.const_value) list)
-Graphql.Schema.execute schema ctx ~variables query
+match Graphql_parser.parse "{ users(limit: $x) { name } }" with
+| Ok query ->
+    let json_variables = Yojson.Basic.(from_string "{\"x\": 42}" |> Util.to_assoc) in
+    let variables = (json_variables :> (string * Graphql_parser.const_value) list)
+    Graphql.Schema.execute schema ctx ~variables query
+| Error err ->
+    failwith err
 ```
 
 ### Self-Recursive Objects

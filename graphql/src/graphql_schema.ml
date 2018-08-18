@@ -54,6 +54,7 @@ module Make(Io : IO) = struct
     module Result = struct
       let return x = return (Ok x)
       let bind x f = bind x (function Ok x' -> f x' | Error _ as err -> Io.return err)
+      let map_error x ~f = map x ~f:(function Ok _ as ok -> ok | Error err -> Error (f err))
       let map x ~f = map x ~f:(function Ok x' -> Ok (f x') | Error _ as err -> err)
     end
 
@@ -301,17 +302,17 @@ end
     name   : string;
     doc    : string option;
     fields : ('ctx, 'src) field list Lazy.t;
-    interfaces : abstract list ref;
+    abstracts : abstract list ref;
   }
   and (_, _) field =
     Field : {
       name       : string;
       doc        : string option;
       deprecated : deprecated;
-      typ        : ('ctx, 'io_out) typ;
-      args       : ('maybe_io_out, 'args) Arg.arg_list;
+      typ        : ('ctx, 'out) typ;
+      args       : ('a, 'args) Arg.arg_list;
       resolve    : 'ctx resolve_params -> 'src -> 'args;
-      lift       : 'maybe_io_out -> 'io_out Io.t
+      lift       : 'a -> ('out, string) result Io.t;
     } -> ('ctx, 'src) field
   and (_, _) typ =
     | Object      : ('ctx, 'src) obj -> ('ctx, 'src option) typ
@@ -345,14 +346,14 @@ end
     query = {
       name = query_name;
       doc = None;
-      interfaces = ref [];
+      abstracts = ref [];
       fields = lazy fields;
     };
     mutation = Option.map mutations ~f:(fun fields ->
       {
         name = mutation_name;
         doc = None;
-        interfaces = ref [];
+        abstracts = ref [];
         fields = lazy fields;
       }
     )
@@ -360,17 +361,18 @@ end
 
   (* Constructor functions *)
   let obj ?doc name ~fields =
-    let rec o = Object { name; doc; fields = lazy (fields o); interfaces = ref []} in
+
+    let rec o = Object { name; doc; fields = lazy (fields o); abstracts = ref []} in
     o
 
   let field ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
-    Field { lift = Io.return; name; doc; deprecated; typ; args; resolve }
+    Field { name; doc; deprecated; typ; args; resolve; lift = Io.ok }
 
   let io_field ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
-    Field { lift = id; name; doc; deprecated; typ; args; resolve }
+    Field { name; doc; deprecated; typ; args; resolve; lift = id }
 
   let abstract_field ?doc ?(deprecated=NotDeprecated) name ~typ ~args =
-    AbstractField (Field { lift = Io.return; name; doc; deprecated; typ; args; resolve = Obj.magic () })
+    AbstractField (Field { lift = Io.ok; name; doc; deprecated; typ; args; resolve = Obj.magic () })
 
   let enum ?doc name ~values =
     Enum { name; doc; values }
@@ -392,14 +394,14 @@ end
     i
 
   let add_type abstract_typ typ =
-    match abstract_typ with
-    | Abstract a ->
+    match (abstract_typ, typ) with
+    | Abstract a, Object o ->
         (* TODO add subtype check here *)
         a.types <- (AnyTyp typ)::a.types;
-        fun src ->
-          AbstractValue (typ, src)
+        o.abstracts := a :: !(o.abstracts);
+        fun src -> AbstractValue (typ, src)
     | _ ->
-        invalid_arg "The first argument must be a union or interface"
+        invalid_arg "Arguments must be Interface/Union and Object"
 
   (* Built-in scalars *)
   let int : 'ctx. ('ctx, int option) typ = Scalar {
@@ -433,7 +435,6 @@ end
   }
 
 module Introspection = struct
-  (* any_typ, any_field and any_arg hide type parameters to avoid scope escaping errors *)
   type any_field =
     | AnyField : (_, _) field -> any_field
     | AnyArgField : _ Arg.arg -> any_field
@@ -469,13 +470,14 @@ module Introspection = struct
           in
           List.fold_left reducer (result', visited') (Lazy.force o.fields)
         )
-     | Abstract a as abstract ->
-        unless_visited memo a.name (fun (result, visited) ->
-          let result' = (AnyTyp abstract)::result in
-          let visited' = StringSet.add a.name visited in
-          List.fold_left (fun memo (AnyTyp typ) -> types ~memo typ) (result', visited') a.types
-        )
- and arg_types : type a. (any_typ list * StringSet.t) -> a Arg.arg_typ -> (any_typ list * StringSet.t) = fun memo argtyp ->
+   | Abstract a as abstract ->
+      unless_visited memo a.name (fun (result, visited) ->
+        let result' = (AnyTyp abstract)::result in
+        let visited' = StringSet.add a.name visited in
+        List.fold_left (fun memo (AnyTyp typ) -> types ~memo typ) (result', visited') a.types
+      )
+
+  and arg_types : type a. (any_typ list * StringSet.t) -> a Arg.arg_typ -> (any_typ list * StringSet.t) = fun memo argtyp ->
     match argtyp with
     | Arg.List typ -> arg_types memo typ
     | Arg.NonNullable typ -> arg_types memo typ
@@ -511,7 +513,7 @@ module Introspection = struct
         let memo' = List.cons (AnyArg arg) memo in
         args_to_list ~memo:memo' args
 
-  let no_interfaces = ref []
+  let no_abstracts = ref []
 
   let __type_kind = Enum {
     name = "__TypeKind";
@@ -571,7 +573,7 @@ module Introspection = struct
   let __enum_value : 'ctx. ('ctx, any_enum_value option) typ = Object {
     name = "__EnumValue";
     doc = None;
-    interfaces = no_interfaces;
+    abstracts = no_abstracts;
     fields = lazy [
       Field {
         name = "name";
@@ -579,7 +581,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ (AnyEnumValue enum_value) -> enum_value.name;
       };
       Field {
@@ -588,7 +590,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ (AnyEnumValue enum_value) -> enum_value.doc;
       };
       Field {
@@ -597,7 +599,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable bool;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ (AnyEnumValue enum_value) -> enum_value.deprecated <> NotDeprecated;
       };
       Field {
@@ -606,7 +608,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ (AnyEnumValue enum_value) ->
           match enum_value.deprecated with
           | Deprecated reason -> reason
@@ -618,7 +620,7 @@ module Introspection = struct
   let rec __input_value : 'ctx. ('ctx, any_arg option) typ = Object {
     name = "__InputValue";
     doc = None;
-    interfaces = no_interfaces;
+    abstracts = no_abstracts;
     fields = lazy [
       Field {
         name = "name";
@@ -626,7 +628,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ (AnyArg arg) -> match arg with
           | Arg.DefaultArg a -> a.name
           | Arg.Arg a -> a.name
@@ -637,7 +639,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ (AnyArg arg) -> match arg with
           | Arg.DefaultArg a -> a.doc
           | Arg.Arg a -> a.doc
@@ -648,7 +650,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable __type;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ (AnyArg arg) -> match arg with
           | Arg.DefaultArg a -> AnyArgTyp a.typ
           | Arg.Arg a -> AnyArgTyp a.typ
@@ -659,7 +661,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ (AnyArg v) -> None
       }
     ]
@@ -668,7 +670,7 @@ module Introspection = struct
   and __type : 'ctx . ('ctx, any_typ option) typ = Object {
     name = "__Type";
     doc = None;
-    interfaces = no_interfaces;
+    abstracts = no_abstracts;
     fields = lazy [
       Field {
         name = "kind";
@@ -676,7 +678,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable __type_kind;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ t -> match t with
           | AnyTyp (Object _) -> `Object
           | AnyTyp (Abstract { kind = `Union; _ }) -> `Union
@@ -697,7 +699,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ t -> match t with
           | AnyTyp (Object o) -> Some o.name
           | AnyTyp (Scalar s) -> Some s.name
@@ -714,7 +716,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ t -> match t with
           | AnyTyp (Object o) -> o.doc
           | AnyTyp (Scalar s) -> s.doc
@@ -731,7 +733,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = List (NonNullable __field);
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ t -> match t with
           | AnyTyp (Object o) ->
               Some (List.map (fun f -> AnyField f) (Lazy.force o.fields))
@@ -748,10 +750,11 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = List (NonNullable __type);
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ t -> match t with
-          | AnyTyp (Object i) ->
-              Some (List.map (fun i -> AnyTyp (Abstract i)) !(i.interfaces))
+          | AnyTyp (Object o) ->
+              let interfaces = List.filter (function | { kind = `Interface _; _} -> true | _ -> false) !(o.abstracts) in
+              Some (List.map (fun i -> AnyTyp (Abstract i)) interfaces)
           | _ -> None
       };
       Field {
@@ -760,7 +763,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = List (NonNullable __type);
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ t -> match t with
           | AnyTyp (Abstract a) ->
               Some a.types
@@ -772,7 +775,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = __type;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ t -> match t with
           | AnyTyp (NonNullable typ) -> Some (AnyTyp typ)
           | AnyTyp (List typ) -> Some (AnyTyp typ)
@@ -786,7 +789,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = List (NonNullable __input_value);
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ t -> match t with
           | AnyArgTyp (Arg.Object o) ->
               Some (args_to_list o.fields)
@@ -798,7 +801,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = List (NonNullable __enum_value);
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ t -> match t with
           | AnyTyp (Enum e) -> Some (List.map (fun x -> AnyEnumValue x) e.values)
           | AnyArgTyp (Arg.Enum e) -> Some (List.map (fun x -> AnyEnumValue x) e.values)
@@ -810,7 +813,7 @@ module Introspection = struct
   and __field : 'ctx. ('ctx, any_field option) typ = Object {
     name = "__Field";
     doc = None;
-    interfaces = no_interfaces;
+    abstracts = no_abstracts;
     fields = lazy [
       Field {
         name = "name";
@@ -818,7 +821,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ f -> match f with
           | AnyField (Field f) -> f.name
           | AnyArgField (Arg.Arg a) -> a.name
@@ -830,7 +833,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ f -> match f with
           | AnyField (Field f) -> f.doc
           | AnyArgField (Arg.Arg a) -> a.doc
@@ -842,7 +845,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable (List (NonNullable __input_value));
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ f -> match f with
           | AnyField (Field f) -> args_to_list f.args
           | AnyArgField _ -> []
@@ -853,7 +856,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable __type;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ f -> match f with
           | AnyField (Field f) -> AnyTyp f.typ
           | AnyArgField (Arg.Arg a) -> AnyArgTyp a.typ
@@ -865,7 +868,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable bool;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ f -> match f with
           | AnyField (Field { deprecated = Deprecated _ }) -> true
           | _ -> false
@@ -876,7 +879,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ f -> match f with
           | AnyField (Field { deprecated = Deprecated reason }) -> reason
           | _ -> None
@@ -887,7 +890,7 @@ module Introspection = struct
   let __directive = Object {
     name = "__Directive";
     doc = None;
-    interfaces = no_interfaces;
+    abstracts = no_abstracts;
     fields = lazy [
       Field {
         name = "name";
@@ -895,7 +898,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable string;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ d -> d.name
       }
     ]
@@ -904,7 +907,7 @@ module Introspection = struct
   let __schema : 'ctx. ('ctx, 'ctx schema option) typ = Object {
     name = "__Schema";
     doc = None;
-    interfaces = no_interfaces;
+    abstracts = no_abstracts;
     fields = lazy [
       Field {
         name = "types";
@@ -912,7 +915,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable (List (NonNullable __type));
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ s ->
           let query_types, visited = types (Object s.query) in
           match s.mutation with
@@ -925,7 +928,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable __type;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ s -> AnyTyp (Object s.query)
       };
       Field {
@@ -934,7 +937,7 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = __type;
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ s -> Option.map s.mutation ~f:(fun mut -> AnyTyp (Object mut))
       };
       Field {
@@ -943,8 +946,17 @@ module Introspection = struct
         deprecated = NotDeprecated;
         typ = NonNullable (List (NonNullable __directive));
         args = Arg.[];
-        lift = Io.return;
+        lift = Io.ok;
         resolve = fun _ s -> []
+      };
+      Field {
+        name = "subscriptionType";
+        doc = None;
+        deprecated = NotDeprecated;
+        typ = __type;
+        args = Arg.[];
+        lift = Io.ok;
+        resolve = fun _ s -> None
       }
     ]
   }
@@ -956,7 +968,7 @@ module Introspection = struct
       deprecated = NotDeprecated;
       typ = NonNullable __schema;
       args = Arg.[];
-      lift = Io.return;
+      lift = Io.ok;
       resolve = fun _ _ -> s
     } in
     let fields = lazy (schema_field::(Lazy.force s.query.fields)) in
@@ -974,13 +986,17 @@ end
     ctx       : 'ctx;
   }
 
+  let matches_type_condition type_condition obj =
+    obj.name = type_condition ||
+      List.exists (fun (abstract : abstract) -> abstract.name = type_condition) !(obj.abstracts)
+
   let rec collect_fields : fragment_map -> ('ctx, 'src) obj -> Graphql_parser.selection list -> Graphql_parser.field list = fun fragment_map obj fields -> 
     List.map (function
     | Graphql_parser.Field field ->
         [field]
     | Graphql_parser.FragmentSpread spread ->
         begin match StringMap.find spread.name fragment_map with
-        | Some fragment when obj.name = fragment.type_condition ->
+          | Some fragment when matches_type_condition fragment.type_condition obj ->
             collect_fields fragment_map obj fragment.selection_set
         | _ ->
             []
@@ -989,7 +1005,7 @@ end
         match fragment.type_condition with
         | None ->
             collect_fields fragment_map obj fragment.selection_set
-        | Some condition when condition = obj.name ->
+        | Some condition when matches_type_condition condition obj ->
             collect_fields fragment_map obj fragment.selection_set
         | _ -> []
     ) fields
@@ -1003,88 +1019,120 @@ end
   let field_from_object : ('ctx, 'src) obj -> string -> ('ctx, 'src) field option = fun obj field_name ->
     List.find (fun (Field field) -> field.name = field_name) (Lazy.force obj.fields)
 
-  let coerce_or_null : 'a option -> ('a -> (Yojson.Basic.json, string) result Io.t) -> (Yojson.Basic.json, string) result Io.t = fun src f ->
-    match src with
-    | None -> Io.ok `Null
-    | Some src' -> f src'
+  let coerce_or_null : 'a option -> ('a -> (Yojson.Basic.json * string list, 'b) result Io.t) -> (Yojson.Basic.json * string list, 'b) result Io.t =
+    fun src f ->
+      match src with
+      | None -> Io.ok (`Null, [])
+      | Some src' -> f src'
 
-  let map order f xs =
-    match order with
-    | Serial -> Io.map_s f xs
-    | Parallel -> Io.map_p f xs
+  let map_fields_with_order = function
+    | Serial -> Io.map_s ~memo:[]
+    | Parallel -> Io.map_p
 
-  let rec present : type ctx src. ctx execution_context -> src -> Graphql_parser.field -> (ctx, src) typ -> (Yojson.Basic.json, string) result Io.t = fun ctx src query_field typ ->
-    match typ with
-    | Scalar s -> coerce_or_null src (fun x -> Io.return (Ok (s.coerce x)))
-    | List t ->
-        coerce_or_null src (fun src' ->
-          List.map (fun x -> present ctx x query_field t) src'
-          |> Io.all
-          |> Io.map ~f:List.Result.join
-          |> Io.Result.map ~f:(fun field_values -> `List field_values)
-        )
-    | NonNullable t -> present ctx (Some src) query_field t
-    | Object o ->
-        coerce_or_null src (fun src' ->
-          let fields = collect_fields ctx.fragments o query_field.selection_set in
-          resolve_fields ctx src' o fields
-        )
-    | Enum e ->
-        coerce_or_null src (fun src' ->
-          match List.find (fun enum_value -> src' == enum_value.value) e.values with
-          | Some enum_value -> Io.ok (`String enum_value.name)
-          | None -> Io.ok `Null
-        )
-    | Abstract u ->
-        coerce_or_null src (fun (AbstractValue (typ', src')) ->
-          present ctx (Some src') query_field typ'
-        )
+  let rec present : type ctx src. ctx execution_context -> src -> Graphql_parser.field -> (ctx, src) typ -> (Yojson.Basic.json * string list, [`Validation_error of string | `Argument_error of string | `Resolve_error of string]) result Io.t =
+    fun ctx src query_field typ ->
+      match typ with
+      | Scalar s -> coerce_or_null src (fun x -> Io.ok (s.coerce x, []))
+      | List t ->
+          coerce_or_null src (fun src' ->
+            List.map (fun x -> present ctx x query_field t) src'
+            |> Io.all
+            |> Io.map ~f:List.Result.join
+            |> Io.Result.map ~f:(fun xs -> (`List (List.map fst xs), List.map snd xs |> List.concat))
+          )
+      | NonNullable t -> present ctx (Some src) query_field t
+      | Object o ->
+          coerce_or_null src (fun src' ->
+            let fields = collect_fields ctx.fragments o query_field.selection_set in
+            resolve_fields ctx src' o fields
+          )
+      | Enum e ->
+          coerce_or_null src (fun src' ->
+            match List.find (fun enum_value -> src' == enum_value.value) e.values with
+            | Some enum_value -> Io.ok (`String enum_value.name, [])
+            | None -> Io.ok (`Null, [])
+          )
+      | Abstract u ->
+          coerce_or_null src (fun (AbstractValue (typ', src')) ->
+            present ctx (Some src') query_field typ'
+          )
 
-  and resolve_field : type ctx src. ctx execution_context -> src -> Graphql_parser.field -> (ctx, src) field -> ((string * Yojson.Basic.json), string) result Io.t = fun ctx src query_field (Field field) ->
-    let open Io.Infix in
-    let name = alias_or_name query_field in
-    let resolve_params = {
-      ctx = ctx.ctx;
-      field = query_field;
-      variables = ctx.variables
-    } in
-    let resolver = field.resolve resolve_params src in
-    match Arg.eval_arglist ctx.variables field.args query_field.arguments resolver with
-    | Error _ as err -> Io.return err
-    | Ok tmp ->
-        field.lift tmp >>= fun resolved ->
-        present ctx resolved query_field field.typ >>|? fun value ->
-        name, value
+  and resolve_field : type ctx src. ctx execution_context -> src -> Graphql_parser.field -> (ctx, src) field -> ((string * Yojson.Basic.json) * string list, [`Validation_error of string | `Argument_error of string | `Resolve_error of string]) result Io.t =
+    fun ctx src query_field (Field field) ->
+      let open Io.Infix in
+      let name = alias_or_name query_field in
+      let resolve_params = {
+        ctx = ctx.ctx;
+        field = query_field;
+        variables = ctx.variables
+      } in
+      let resolver = field.resolve resolve_params src in
+      match Arg.eval_arglist ctx.variables field.args query_field.arguments resolver with
+      | Ok unlifted_value ->
+          let lifted_value =
+            field.lift unlifted_value
+            |> Io.Result.map_error ~f:(fun err -> `Resolve_error err) >>=? fun resolved ->
+            present ctx resolved query_field field.typ
+          in
+          lifted_value >>| (function
+          | Ok (value, errors) ->
+              Ok ((name, value), errors)
+          | Error (`Argument_error _)
+          | Error (`Validation_error _) as err ->
+              err
+          | Error (`Resolve_error err) as error ->
+              match field.typ with
+              | NonNullable _ ->
+                  error
+              | _ ->
+                  Ok ((name, `Null), [err])
+          )
+      | Error err ->
+          Io.error (`Argument_error err)
 
-  and resolve_fields : type ctx src. ctx execution_context -> ?execution_order:execution_order -> src -> (ctx, src) obj -> Graphql_parser.field list -> (Yojson.Basic.json, string) result Io.t = fun ctx ?execution_order:(execution_order=Parallel) src obj fields ->
-    map execution_order (fun (query_field : Graphql_parser.field) ->
-      if query_field.name = "__typename" then
-        Io.ok (alias_or_name query_field, `String obj.name)
-      else
-        match field_from_object obj query_field.name with
-        | Some field ->
-            resolve_field ctx src query_field field
-        | None ->
-            Io.ok (alias_or_name query_field, `Null)
-    ) fields
-    |> Io.map ~f:List.Result.join
-    |> Io.Result.map ~f:(fun properties -> `Assoc properties)
+  and resolve_fields : type ctx src. ctx execution_context -> ?execution_order:execution_order -> src -> (ctx, src) obj -> Graphql_parser.field list -> (Yojson.Basic.json * string list, [`Validation_error of string | `Argument_error of string | `Resolve_error of string]) result Io.t =
+    fun ctx ?execution_order:(execution_order=Parallel) src obj fields ->
+      map_fields_with_order execution_order (fun (query_field : Graphql_parser.field) ->
+        if query_field.name = "__typename" then
+          Io.ok ((alias_or_name query_field, `String obj.name), [])
+        else
+          match field_from_object obj query_field.name with
+          | Some field ->
+              resolve_field ctx src query_field field
+          | None ->
+              let error_message = Printf.sprintf "Field '%s' is not defined on type '%s'" query_field.name obj.name in
+              Io.error (`Validation_error error_message)
+      ) fields
+      |> Io.map ~f:List.Result.join
+      |> Io.Result.map ~f:(fun xs -> (`Assoc (List.map fst xs), List.map snd xs |> List.concat))
 
-  let execute_operation : 'ctx schema -> 'ctx execution_context -> fragment_map -> variable_map -> Graphql_parser.operation -> (Yojson.Basic.json, string) result Io.t = fun schema ctx fragments variables operation ->
-    match operation.optype with
-    | Graphql_parser.Query ->
-        let query  = schema.query in
-        let fields = collect_fields fragments query operation.selection_set in
-        resolve_fields ctx () query fields
-    | Graphql_parser.Mutation ->
-        begin match schema.mutation with
-        | None -> Io.error "Schema is not configured for mutations"
-        | Some mut ->
-            let fields = collect_fields fragments mut operation.selection_set in
-            resolve_fields ~execution_order:Serial ctx () mut fields
-        end
-    | Graphql_parser.Subscription ->
-        Io.error "Subscription is not implemented"
+  type execute_error = [
+    | `Argument_error of string
+    | `Resolve_error of string
+    | `Validation_error of string
+    | `Mutations_not_configured
+    | `Subscriptions_not_implemented
+    | `No_operation_found
+    | `Operation_name_required
+    | `Operation_not_found
+  ]
+
+  let execute_operation : 'ctx schema -> 'ctx execution_context -> fragment_map -> variable_map -> Graphql_parser.operation -> (Yojson.Basic.json * string list, [> execute_error]) result Io.t =
+    fun schema ctx fragments variables operation ->
+      match operation.optype with
+      | Graphql_parser.Query ->
+          let query  = schema.query in
+          let fields = collect_fields fragments query operation.selection_set in
+          (resolve_fields ctx () query fields : (Yojson.Basic.json * string list, [`Validation_error of string | `Argument_error of string | `Resolve_error of string]) result Io.t :> (Yojson.Basic.json * string list, [> execute_error]) result Io.t)
+      | Graphql_parser.Mutation ->
+          begin match schema.mutation with
+          | None -> Io.error `Mutations_not_configured
+          | Some mut ->
+              let fields = collect_fields fragments mut operation.selection_set in
+              (resolve_fields ~execution_order:Serial ctx () mut fields : (Yojson.Basic.json * string list, [`Validation_error of string | `Argument_error of string | `Resolve_error of string]) result Io.t :> (Yojson.Basic.json * string list, [> execute_error]) result Io.t)
+          end
+      | Graphql_parser.Subscription ->
+          Io.error `Subscriptions_not_implemented
 
   let collect_fragments doc =
     List.fold_left (fun memo -> function
@@ -1093,31 +1141,32 @@ end
     ) StringMap.empty doc
 
   exception FragmentCycle of string list
-  let rec validate_fragments fragment_map = Ok fragment_map
-    (* try *)
-    (*   StringMap.iter (fun name _ -> *)
-    (*     ignore (validate_fragment fragment_map StringSet.empty name) *)
-    (*   ) fragment_map; *)
-    (*   Ok fragment_map *)
-    (* with FragmentCycle fragment_names -> *)
-    (*   let cycle = String.concat ", " fragment_names in *)
-    (*   Error (Format.sprintf "Fragment cycle detected: %s" cycle) *)
+  let rec validate_fragments fragment_map =
+    try
+      StringMap.iter (fun name _ ->
+        validate_fragment fragment_map StringSet.empty name
+      ) fragment_map;
+      Ok fragment_map
+    with FragmentCycle fragment_names ->
+      let cycle = String.concat ", " fragment_names in
+      let msg = Format.sprintf "Fragment cycle detected: %s" cycle in
+      Error (`Validation_error msg)
 
   and validate_fragment (fragment_map : fragment_map) visited name =
     match StringMap.find name fragment_map with
-    | None -> visited
+    | None -> ()
     | Some fragment when StringSet.mem fragment.name visited ->
         raise (FragmentCycle (StringSet.elements visited))
     | Some fragment ->
         let visited' = StringSet.add fragment.name visited in
-        List.fold_left (validate_fragment_selection fragment_map) visited' fragment.selection_set
+        List.iter (validate_fragment_selection fragment_map visited') fragment.selection_set
 
   and validate_fragment_selection fragment_map visited selection =
     match selection with
     | Graphql_parser.Field field ->
-        List.fold_left (validate_fragment_selection fragment_map) visited field.selection_set
+        List.iter (validate_fragment_selection fragment_map visited) field.selection_set
     | InlineFragment inline_fragment ->
-        List.fold_left (validate_fragment_selection fragment_map) visited inline_fragment.selection_set
+        List.iter (validate_fragment_selection fragment_map visited) inline_fragment.selection_set
     | FragmentSpread fragment_spread ->
         validate_fragment fragment_map visited fragment_spread.name
 
@@ -1134,14 +1183,24 @@ end
   let rec select_operation ?operation_name doc =
     let operations = collect_operations doc in
     match operation_name, operations with
-    | _, [] -> Error "No operation found"
+    | _, [] -> Error `No_operation_found
     | None, [op] -> Ok op
-    | None, _::_ -> Error "Operation name required"
+    | None, _::_ -> Error `Operation_name_required
     | Some name, ops ->
         try
           Ok (List.find_exn (fun op -> op.Graphql_parser.name = Some name) ops)
         with Not_found ->
-          Error "Operation not found"
+          Error `Operation_not_found
+
+  let error_to_json err =
+    `Assoc ["message", `String err]
+
+  let error_response err =
+    `Assoc [
+      "errors", `List [
+        error_to_json err
+      ]
+    ]
 
   let execute schema ctx ?variables:(variables=[]) ?operation_name doc =
     let open Io.Infix in
@@ -1154,6 +1213,28 @@ end
       execute_operation schema' execution_ctx fragments variables op
     in
     execute' schema ctx doc >>| function
-    | Ok data   -> Ok (`Assoc ["data", data])
-    | Error err -> Error (`Assoc ["errors", `List [`Assoc ["message", `String err]]])
+    | Ok (data, []) ->
+        Ok (`Assoc ["data", data])
+    | Ok (data, errors) ->
+        let errors = List.map error_to_json errors in
+        Ok (`Assoc [
+          "data", data;
+          "errors", `List errors
+        ])
+    | Error `No_operation_found ->
+        Error (error_response "No operation found")
+    | Error `Operation_not_found ->
+        Error (error_response "Operation not found")
+    | Error `Operation_name_required ->
+        Error (error_response "Operation name required")
+    | Error `Subscriptions_not_implemented ->
+        Error (error_response "Subscriptions not implemented")
+    | Error `Mutations_not_configured ->
+        Error (error_response "Mutations not configured")
+    | Error `Validation_error err ->
+        Error (error_response err)
+    | Error (`Argument_error err)
+    | Error (`Resolve_error err) ->
+        let `Assoc errors = error_response err in
+        Error (`Assoc (("data", `Null)::errors))
 end

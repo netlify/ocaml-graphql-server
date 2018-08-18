@@ -109,7 +109,7 @@ module type Schema = sig
                  ?deprecated:deprecated ->
                  string ->
                  typ:('ctx, 'a) typ ->
-                 args:('a io, 'b) Arg.arg_list ->
+                 args:(('a, string) result io, 'b) Arg.arg_list ->
                  resolve:('ctx resolve_params -> 'src -> 'b) ->
                  ('ctx, 'src) field
 

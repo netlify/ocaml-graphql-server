@@ -11,6 +11,7 @@
     variable_test
     argument_test
     introspection_test
+    error_test
     abstract_test))
   (libraries (graphql alcotest))))
 

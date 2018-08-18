@@ -1,7 +1,19 @@
-Unreleased
+0.7.0 2018-08-10
+---------------------------------
+
+- Allow returning errors from resolve function of io_field (#69)
+- Support for union and interface types (#70)
+- Expose HTTP request to context construction function in Graphql_lwt.Server.start (#88)
+- Fix error response from Graphql_lwt.Server (#96)
+- Allow passing operation name to Graphql_lwt.Server (#103)
+- Querying undefined fields gives validation error (#105)
+- Fix parsing of enums with E (#109)
+
+0.6.0 2018-03-31
 ---------------------------------
 
 - Prevent fragment cycles (#78)
+- graphql-lwt depends on cohttp 1.0.0 (#71)
 
 0.5.0 2018-01-18
 ---------------------------------
