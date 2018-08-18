@@ -361,7 +361,6 @@ end
 
   (* Constructor functions *)
   let obj ?doc name ~fields =
-
     let rec o = Object { name; doc; fields = lazy (fields o); abstracts = ref []} in
     o
 
@@ -435,6 +434,7 @@ end
   }
 
 module Introspection = struct
+  (* any_typ, any_field and any_arg hide type parameters to avoid scope escaping errors *)
   type any_field =
     | AnyField : (_, _) field -> any_field
     | AnyArgField : _ Arg.arg -> any_field
