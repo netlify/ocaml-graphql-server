@@ -2,6 +2,17 @@
 
 (library
  ((name graphql)
+  (flags
+    (:standard
+      -w -27
+      -w -32
+      -w -9
+      -w -6
+      -w -34
+      -w -8
+      -w -30
+      -w -39
+      -warn-error -33-27-39-26))
   (public_name graphql)
   (wrapped false)
   (libraries (graphql_parser yojson rresult seq))))

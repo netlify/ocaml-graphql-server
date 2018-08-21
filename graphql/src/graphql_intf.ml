@@ -1,3 +1,10 @@
+module StringMap = struct
+  include Map.Make(String)
+  exception Missing_key of string
+  let find_exn key t = try find key t with Not_found -> raise (Missing_key key)
+  let find k t = try Some (find_exn k t) with Missing_key _ -> None
+end
+
 (** GraphQL schema signature *)
 module type Schema = sig
   type +'a io
@@ -16,6 +23,8 @@ module type Schema = sig
   type 'a enum_value
 
   (** {3 Constructors } *)
+
+  type variable_map = Graphql_parser.const_value StringMap.t
 
   val schema : ?mutation_name:string ->
                ?mutations:('ctx, unit) field list ->
@@ -85,12 +94,18 @@ module type Schema = sig
     val non_null : 'a option arg_typ -> 'a arg_typ
   end
 
+  type 'ctx resolve_params = {
+    ctx : 'ctx;
+    field : Graphql_parser.field;
+    variables : variable_map;
+  }
+
   val field : ?doc:string ->
               ?deprecated:deprecated ->
               string ->
               typ:('ctx, 'a) typ ->
               args:('a, 'b) Arg.arg_list ->
-              resolve:('ctx -> 'src -> 'b) ->
+              resolve:('ctx resolve_params -> 'src -> 'b) ->
               ('ctx, 'src) field
 
   val io_field : ?doc:string ->
@@ -98,7 +113,7 @@ module type Schema = sig
                  string ->
                  typ:('ctx, 'a) typ ->
                  args:(('a, string) result io, 'b) Arg.arg_list ->
-                 resolve:('ctx -> 'src -> 'b) ->
+                 resolve:('ctx resolve_params -> 'src -> 'b) ->
                  ('ctx, 'src) field
 
   val subscription_field : ?doc:string ->
@@ -106,7 +121,7 @@ module type Schema = sig
                            string ->
                            typ:('ctx, 'out) typ ->
                            args:(('out stream, string) result io, 'args) Arg.arg_list ->
-                           resolve:('ctx -> 'args) ->
+                           resolve:('ctx resolve_params -> 'args) ->
                            'ctx subscription_field
 
   val enum : ?doc:string ->
