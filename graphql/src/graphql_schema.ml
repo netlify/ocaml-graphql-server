@@ -1144,7 +1144,7 @@ end
           )
       | Enum e ->
           coerce_or_null src (fun src' ->
-            match List.find (fun enum_value -> src' == enum_value.value) e.values with
+            match List.find (fun enum_value -> src' = enum_value.value) e.values with
             | Some enum_value -> Io.ok (`String enum_value.name, [])
             | None -> Io.ok (`Null, [])
           )
