@@ -25,6 +25,7 @@ module type Schema = sig
   (** {3 Constructors } *)
 
   type variable_map = Graphql_parser.const_value StringMap.t
+  type fragment_map = Graphql_parser.fragment StringMap.t
 
   val schema : ?mutation_name:string ->
                ?mutations:('ctx, unit) field list ->
@@ -98,6 +99,7 @@ module type Schema = sig
     ctx : 'ctx;
     field : Graphql_parser.field;
     variables : variable_map;
+    fragments : fragment_map
   }
 
   val field : ?doc:string ->
