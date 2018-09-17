@@ -12,4 +12,11 @@ module Stream = struct
     Async_kernel.Deferred.Queue.map q ~f)
 end
 
-module Schema = Graphql_schema.Make (Io) (Stream)
+module Err = struct
+  type t = string
+
+  let message_of_error t = t
+  let error_of_message t = t
+end
+
+module Schema = Graphql_schema.Make (Io) (Stream) (Err)

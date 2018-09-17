@@ -38,10 +38,18 @@ module type Stream = sig
   val map : 'a t -> ('a -> 'b io) -> 'b t
 end
 
+module type Err = sig
+    type t
+    val message_of_error : t -> string
+    val error_of_message : string -> t
+end
+
 (* Schema *)
-module Make (Io : IO) (Stream: Stream with type 'a io = 'a Io.t) = struct
+module Make (Io : IO) (Stream: Stream with type 'a io = 'a Io.t) (Err: Err) = struct
   type +'a io = 'a Io.t
   type 'a stream = 'a Stream.t
+
+  type err = Err.t
 
   module Io = struct
     include Io
@@ -317,7 +325,7 @@ module Make (Io : IO) (Stream: Stream with type 'a io = 'a Io.t) = struct
       typ        : ('ctx, 'out) typ;
       args       : ('a, 'args) Arg.arg_list;
       resolve    : 'ctx resolve_params -> 'src -> 'args;
-      lift       : 'a -> ('out, string) result Io.t;
+      lift       : 'a -> ('out, err) result Io.t;
     } -> ('ctx, 'src) field
   and (_, _) typ =
     | Object      : ('ctx, 'src) obj -> ('ctx, 'src option) typ
@@ -1048,7 +1056,7 @@ end
   }
 
   type path = [`String of string | `Int of int] list
-  type error = string * path
+  type error = err * path
 
   type resolve_error = [
     | `Resolve_error of error
@@ -1171,7 +1179,7 @@ end
       | Ok unlifted_value ->
           let lifted_value =
             field.lift unlifted_value
-            |> Io.Result.map_error ~f:(fun err -> `Resolve_error (err, path')) >>=? fun resolved ->
+            |> Io.Result.map_error ~f:(fun (err: err) -> `Resolve_error (err, path')) >>=? fun resolved ->
             present ctx resolved query_field field.typ path'
           in
           lifted_value >>| (function
@@ -1209,8 +1217,8 @@ end
 
   let data_to_json = function
     | data, [] -> `Assoc ["data", data]
-    | data, errors ->
-        let errors = List.map (fun (msg, path) -> error_to_json ~path msg) errors in
+    | data, (errors: error list) ->
+        let errors = List.map (fun ((msg: err), path) -> error_to_json ~path (Err.message_of_error msg)) errors in
         `Assoc [
           "data", data;
           "errors", `List errors
@@ -1234,7 +1242,7 @@ end
         let `Assoc errors = error_response msg in
         Error (`Assoc (("data", `Null)::errors))
     | Error (`Resolve_error (msg, path)) ->
-        let `Assoc errors = error_response ~path msg in
+        let `Assoc errors = error_response ~path (Err.message_of_error msg) in
         Error (`Assoc (("data", `Null)::errors))
 
   let subscribe : type ctx. ctx execution_context -> ctx subscription_field -> Graphql_parser.field -> (Yojson.Basic.json response Stream.t, [> resolve_error]) result Io.t
@@ -1263,7 +1271,7 @@ end
             )
           )
           |> Io.Result.map_error ~f:(fun err ->
-            `Resolve_error (err, path)
+            `Resolve_error ((Err.error_of_message err), path)
           )
       | Error err -> Io.error (`Argument_error err)
 

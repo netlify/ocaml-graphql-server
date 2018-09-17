@@ -10,6 +10,8 @@ module type Schema = sig
   type +'a io
   type 'a stream
 
+  type err
+
   (** {3 Base types } *)
 
   type 'ctx schema
@@ -114,7 +116,7 @@ module type Schema = sig
                  ?deprecated:deprecated ->
                  string ->
                  typ:('ctx, 'a) typ ->
-                 args:(('a, string) result io, 'b) Arg.arg_list ->
+                 args:(('a, err) result io, 'b) Arg.arg_list ->
                  resolve:('ctx resolve_params -> 'src -> 'b) ->
                  ('ctx, 'src) field
 
