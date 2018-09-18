@@ -41,7 +41,7 @@ end
 module type Err = sig
     type t
     val message_of_error : t -> string
-    val error_of_message : string -> t
+    val extensions_of_error : t -> (string * Yojson.Basic.json) list
 end
 
 (* Schema *)
@@ -1121,17 +1121,22 @@ end
     | Serial -> Io.map_s ~memo:[]
     | Parallel -> Io.map_p
 
-  let error_to_json ?path msg =
+  let error_to_json ?path ?extensions  msg =
     let props = match path with
     | Some path -> ["path", `List (List.rev path :> Yojson.Basic.json list)]
     | None -> []
     in
-    (`Assoc (("message", `String msg)::props) : Yojson.Basic.json)
+    let extensionProps = match extensions with
+      | None
+      | Some [] -> []
+      | Some extensions -> ["extensions", `Assoc extensions]
+    in
+    (`Assoc (("message", `String msg)::(List.concat [props; extensionProps])) : Yojson.Basic.json)
 
-  let error_response ?path msg =
+  let error_response ?path ?extensions msg =
     `Assoc [
       "errors", `List [
-        error_to_json ?path msg
+        error_to_json ?path ?extensions msg
       ]
     ]
 
@@ -1218,7 +1223,7 @@ end
   let data_to_json = function
     | data, [] -> `Assoc ["data", data]
     | data, (errors: error list) ->
-        let errors = List.map (fun ((msg: err), path) -> error_to_json ~path (Err.message_of_error msg)) errors in
+        let errors = List.map (fun ((err: err), path) -> error_to_json ~path ~extensions:(Err.extensions_of_error err) (Err.message_of_error err)) errors in
         `Assoc [
           "data", data;
           "errors", `List errors
@@ -1241,8 +1246,8 @@ end
     | Error (`Argument_error msg) ->
         let `Assoc errors = error_response msg in
         Error (`Assoc (("data", `Null)::errors))
-    | Error (`Resolve_error (msg, path)) ->
-        let `Assoc errors = error_response ~path (Err.message_of_error msg) in
+    | Error (`Resolve_error (err, path)) ->
+       let `Assoc errors = error_response ~path ~extensions:(Err.extensions_of_error err) (Err.message_of_error err) in
         Error (`Assoc (("data", `Null)::errors))
 
   let subscribe : type ctx. ctx execution_context -> ctx subscription_field -> Graphql_parser.field -> (Yojson.Basic.json response Stream.t, [> resolve_error]) result Io.t
@@ -1261,6 +1266,7 @@ end
       match Arg.eval_arglist ctx.variables subs_field.args field.arguments resolver with
       | Ok result ->
           result
+          |> Io.Result.map_error ~f:(fun err -> `Argument_error err)
           |> Io.Result.map ~f:(fun source_stream ->
             Stream.map source_stream (fun value ->
               present ctx value field subs_field.typ path
@@ -1269,9 +1275,6 @@ end
               )
               >>| to_response
             )
-          )
-          |> Io.Result.map_error ~f:(fun err ->
-            `Resolve_error ((Err.error_of_message err), path)
           )
       | Error err -> Io.error (`Argument_error err)
 

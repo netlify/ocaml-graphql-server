@@ -16,7 +16,7 @@ module Err = struct
   type t = string
 
   let message_of_error t = t
-  let error_of_message t = t
+  let extensions_of_error _t = []
 end
 
 module Schema = Graphql_schema.Make (Io) (Stream) (Err)

@@ -17,12 +17,12 @@ module type Stream = sig
 end
 
 (* Err *)
-module type Err =
-  sig
-    type t
-    val message_of_error : t -> string
-    val error_of_message : string -> t
-  end
+module type Err = sig
+  type t
+
+  val message_of_error : t -> string
+  val extensions_of_error : t -> (string * Yojson.Basic.json) list
+end
 
 
 (* GraphQL schema functor *)
