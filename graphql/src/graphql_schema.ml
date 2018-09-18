@@ -354,7 +354,7 @@ module Make (Io : IO) (Stream: Stream with type 'a io = 'a Io.t) (Err: Err) = st
       doc        : string option;
       deprecated : deprecated;
       typ        : ('ctx, 'out) typ;
-      args       : (('out stream, string) result io, 'args) Arg.arg_list;
+      args       : (('out stream, err) result io, 'args) Arg.arg_list;
       resolve    : 'ctx resolve_params -> 'args;
     } -> 'ctx subscription_field
 
@@ -1266,7 +1266,6 @@ end
       match Arg.eval_arglist ctx.variables subs_field.args field.arguments resolver with
       | Ok result ->
           result
-          |> Io.Result.map_error ~f:(fun err -> `Argument_error err)
           |> Io.Result.map ~f:(fun source_stream ->
             Stream.map source_stream (fun value ->
               present ctx value field subs_field.typ path
@@ -1276,6 +1275,7 @@ end
               >>| to_response
             )
           )
+          |> Io.Result.map_error ~f:(fun err -> `Resolve_error (err, path))
       | Error err -> Io.error (`Argument_error err)
 
   let execute_operation : 'ctx schema -> 'ctx execution_context -> fragment_map -> Graphql_parser.operation -> ([ `Response of Yojson.Basic.json | `Stream of Yojson.Basic.json response stream], [> execute_error]) result Io.t =
