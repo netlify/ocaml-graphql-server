@@ -521,7 +521,11 @@ module Introspection = struct
             let memo' = types ~memo f.typ in
             arg_list_types memo' f.args
           in
-          List.fold_left reducer (result', visited') (Lazy.force o.fields)
+          let memo' = List.fold_left reducer (result', visited') (Lazy.force o.fields) in
+          let abstracts_reducer = fun memo a ->
+            types ~memo (Abstract a)
+          in
+          List.fold_left abstracts_reducer memo' !(o.abstracts)
         )
    | Abstract a as abstract ->
       unless_visited memo a.name (fun (result, visited) ->
