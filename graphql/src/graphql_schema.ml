@@ -164,6 +164,33 @@ module Make (Io : IO) (Stream: Stream with type 'a io = 'a Io.t) (Err: Err) = st
     let obj ?doc name ~fields ~coerce =
       Object { name; doc; fields; coerce }
 
+    let rec string_of_const_value: Graphql_parser.const_value -> string = function
+      | `Null -> "null"
+      | `Int i -> string_of_int(i)
+      | `Float f -> string_of_float(f)
+      | `String s -> Printf.sprintf "\"%s\"" s
+      | `Bool b -> string_of_bool(b)
+      | `Enum e -> e
+      | `List l -> Printf.sprintf "[%s]" (String.concat ", " (List.map (fun i -> (string_of_const_value i)) l))
+      | `Assoc a -> Printf.sprintf "{%s}" (String.concat ", " (List.map (fun (k, v) -> Printf.sprintf "%s: %s" k (string_of_const_value v)) a))
+
+    let rec string_of_arg_typ : type a. a arg_typ -> string = function
+      | Scalar(a) -> a.name
+      | Object(a) -> a.name
+      | Enum(a) -> a.name
+      | List(a) -> (Printf.sprintf "[%s]" (string_of_arg_typ a))
+      | NonNullable(a) -> (Printf.sprintf "%s!" (string_of_arg_typ a))
+
+
+    let eval_arg_error field_name arg_name arg_typ value =
+      Printf.sprintf "Argument `%s` of type `%s` expected on field `%s`, %s."
+                     arg_name
+                     (string_of_arg_typ arg_typ)
+                     field_name
+                     (match value with
+                     | Some(v) -> Printf.sprintf "found %s" (string_of_const_value v)
+                     | None -> "but not provided")
+
     (* Built-in argument types *)
     let int = Scalar {
       name = "Int";
@@ -223,13 +250,13 @@ module Make (Io : IO) (Stream: Stream with type 'a io = 'a Io.t) (Err: Err) = st
         let props' = List.map (fun (name, value) -> name, value_to_const_value variable_map value) props in
         `Assoc props'
 
-    let rec eval_arglist : type a b. variable_map -> (a, b) arg_list -> (string * Graphql_parser.value) list -> b -> (a, string) result =
-      fun variable_map arglist key_values f ->
+    let rec eval_arglist : type a b. variable_map -> string -> (a, b) arg_list -> (string * Graphql_parser.value) list -> b -> (a, string) result =
+      fun variable_map field_name arglist key_values f ->
         match arglist with
         | [] -> Ok f
         | (DefaultArg arg)::arglist' ->
             let arglist'' = (Arg { name = arg.name; doc = arg.doc; typ = arg.typ })::arglist' in
-            eval_arglist variable_map arglist'' key_values (function
+            eval_arglist variable_map field_name arglist'' key_values (function
               | None -> f arg.default
               | Some value -> f value
             )
@@ -237,14 +264,14 @@ module Make (Io : IO) (Stream: Stream with type 'a io = 'a Io.t) (Err: Err) = st
             try
               let value = List.assoc arg.name key_values in
               let const_value = Option.map value ~f:(value_to_const_value variable_map) in
-              eval_arg variable_map arg.typ const_value >>= fun coerced ->
-              eval_arglist variable_map arglist' key_values (f coerced)
-            with StringMap.Missing_key key -> Error (Format.sprintf "Missing variable `%s`" key)
+              eval_arg variable_map field_name arg.name arg.typ const_value >>= fun coerced ->
+              eval_arglist variable_map field_name arglist' key_values (f coerced)
+            with StringMap.Missing_key key -> Error (Format.sprintf "Missing variable `%s`" key) (* tackle missing variable next *)
 
-    and eval_arg : type a. variable_map -> a arg_typ -> Graphql_parser.const_value option -> (a, string) result = fun variable_map typ value ->
+    and eval_arg : type a. variable_map -> string -> string -> a arg_typ -> Graphql_parser.const_value option -> (a, string) result = fun variable_map field_name arg_name typ value ->
       match (typ, value) with
-      | NonNullable _, None -> Error "Missing required argument"
-      | NonNullable _, Some `Null -> Error "Missing required argument"
+      | NonNullable _, None -> Error (eval_arg_error field_name arg_name typ value)
+      | NonNullable _, Some `Null -> Error (eval_arg_error field_name arg_name typ value)
       | Scalar _, None -> Ok None
       | Scalar _, Some `Null -> Ok None
       | Object _, None -> Ok None
@@ -254,38 +281,42 @@ module Make (Io : IO) (Stream: Stream with type 'a io = 'a Io.t) (Err: Err) = st
       | Enum _, None -> Ok None
       | Enum _, Some `Null -> Ok None
       | Scalar s, Some value ->
-          s.coerce value >>| fun coerced ->
-          Some coerced
+         let result = match (s.coerce value) with
+         | Ok coerced -> Ok (Some coerced)
+         | Error _ -> Error (eval_arg_error field_name arg_name typ (Some value))
+         in
+         result
       | Object o, Some value ->
           begin match value with
           | `Assoc props ->
               let props' = (props :> (string * Graphql_parser.value) list) in
-              eval_arglist variable_map o.fields props' o.coerce >>| fun coerced ->
+              eval_arglist variable_map field_name o.fields props' o.coerce >>| fun coerced ->
               Some coerced
-          | _ -> Error "Expected object"
+          | _ -> Error (eval_arg_error field_name arg_name typ (Some value))
           end
      | List typ, Some value ->
           begin match value with
           | `List values ->
               let option_values = List.map (fun x -> Some x) values in
-              List.Result.all (eval_arg variable_map typ) option_values >>| fun coerced ->
+              List.Result.all (eval_arg variable_map field_name arg_name typ) option_values >>| fun coerced ->
               Some coerced
-          | value -> eval_arg variable_map typ (Some value) >>| fun coerced ->
+          | value -> eval_arg variable_map field_name arg_name typ (Some value) >>| fun coerced ->
               (Some [coerced] : a)
           end
       | NonNullable typ, value ->
-          eval_arg variable_map typ value >>= (function
+          eval_arg variable_map field_name arg_name typ value >>= (function
           | Some value -> Ok value
-          | None -> Error "Missing required argument")
+          | None ->
+             Error (eval_arg_error field_name arg_name typ None))
       | Enum e, Some value ->
           begin match value with
           | `Enum v
           | `String v ->
               begin match List.find (fun enum_value -> enum_value.name = v) e.values with
               | Some enum_value -> Ok (Some enum_value.value)
-              | None -> Error "Invalid enum value"
+              | None -> Error (Printf.sprintf "Invalid enum value for argument `%s` on field `%s`" arg_name field_name)
               end
-          | _ -> Error "Expected enum"
+          | _ -> Error (Printf.sprintf "Expected enum for argument `%s` on field `%s`" arg_name field_name)
           end
   end
 
@@ -1184,7 +1215,7 @@ end
         fragments = ctx.fragments
       } in
       let resolver = field.resolve resolve_params src in
-      match Arg.eval_arglist ctx.variables field.args query_field.arguments resolver with
+      match Arg.eval_arglist ctx.variables field.name field.args query_field.arguments resolver with
       | Ok unlifted_value ->
           let lifted_value =
             field.lift unlifted_value
@@ -1267,7 +1298,7 @@ end
         fragments = ctx.fragments
       } in
       let resolver = subs_field.resolve resolve_params in
-      match Arg.eval_arglist ctx.variables subs_field.args field.arguments resolver with
+      match Arg.eval_arglist ctx.variables subs_field.name subs_field.args field.arguments resolver with
       | Ok result ->
           result
           |> Io.Result.map ~f:(fun source_stream ->
