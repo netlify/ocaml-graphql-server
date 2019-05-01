@@ -1,17 +1,3 @@
-module Io = struct
-  type +'a t = 'a
-
-  let bind x f = f x
-  let return x = x
-end
-
-module Stream = struct
-  type +'a io = 'a Io.t
-  type 'a t = 'a Seq.t
-
-  let map x f = Seq.map f x
-end
-
 module Err = struct
   type t = string
 
@@ -19,4 +5,17 @@ module Err = struct
   let extensions_of_error _t = []
 end
 
-module Schema = Graphql_schema.Make (Io) (Stream) (Err)
+module Schema = Graphql_schema.Make (struct
+  type +'a t = 'a
+
+  let bind t f = f t
+  let return t = t
+
+  module Stream = struct
+    type 'a t = 'a Seq.t
+
+    let map t f = Seq.map f t
+    let iter t f = Seq.iter f t
+    let close _t = ()
+  end
+end) (Err)

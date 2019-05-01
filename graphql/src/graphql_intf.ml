@@ -5,10 +5,34 @@ module StringMap = struct
   let find k t = try Some (find_exn k t) with Missing_key _ -> None
 end
 
+(* IO signature *)
+module type IO = sig
+  type +'a t
+
+  val return : 'a -> 'a t
+  val bind : 'a t -> ('a -> 'b t) -> 'b t
+
+  module Stream : sig
+    type 'a t
+    type +'a io
+
+    val map : 'a t -> ('a -> 'b io) -> 'b t
+    val iter : 'a t -> ('a -> unit io) -> unit io
+    val close : 'a t -> unit
+  end with type 'a io := 'a t
+end
+
 (** GraphQL schema signature *)
 module type Schema = sig
-  type +'a io
-  type 'a stream
+  module Io : IO
+
+  module StringMap : sig
+    include Map.S with type key = string
+    (* Map.S with type key = String.t *)
+    exception Missing_key of key
+    val find_exn : key -> 'a t -> 'a
+    val find : key -> 'a t -> 'a option
+  end
 
   type err
 
@@ -25,9 +49,6 @@ module type Schema = sig
   type 'a enum_value
 
   (** {3 Constructors } *)
-
-  type variable_map = Graphql_parser.const_value StringMap.t
-  type fragment_map = Graphql_parser.fragment StringMap.t
 
   val schema : ?mutation_name:string ->
                ?mutations:('ctx, unit) field list ->
@@ -97,11 +118,13 @@ module type Schema = sig
     val non_null : 'a option arg_typ -> 'a arg_typ
   end
 
-  type 'ctx resolve_params = {
+  type variable_map = Graphql_parser.const_value StringMap.t
+  type fragment_map = Graphql_parser.fragment StringMap.t
+  type 'ctx resolve_info = {
     ctx : 'ctx;
     field : Graphql_parser.field;
+    fragments : fragment_map;
     variables : variable_map;
-    fragments : fragment_map
   }
 
   val field : ?doc:string ->
@@ -109,23 +132,23 @@ module type Schema = sig
               string ->
               typ:('ctx, 'a) typ ->
               args:('a, 'b) Arg.arg_list ->
-              resolve:('ctx resolve_params -> 'src -> 'b) ->
+              resolve:('ctx resolve_info -> 'src -> 'b) ->
               ('ctx, 'src) field
 
   val io_field : ?doc:string ->
                  ?deprecated:deprecated ->
                  string ->
                  typ:('ctx, 'a) typ ->
-                 args:(('a, err) result io, 'b) Arg.arg_list ->
-                 resolve:('ctx resolve_params -> 'src -> 'b) ->
+                 args:(('a, err) result Io.t, 'b) Arg.arg_list ->
+                 resolve:('ctx resolve_info -> 'src -> 'b) ->
                  ('ctx, 'src) field
 
   val subscription_field : ?doc:string ->
                            ?deprecated:deprecated ->
                            string ->
                            typ:('ctx, 'out) typ ->
-                           args:(('out stream, err) result io, 'args) Arg.arg_list ->
-                           resolve:('ctx resolve_params -> 'args) ->
+                           args:(('out Io.Stream.t, err) result Io.t, 'args) Arg.arg_list ->
+                           resolve:('ctx resolve_info -> 'args) ->
                            'ctx subscription_field
 
   val enum : ?doc:string ->
@@ -137,6 +160,7 @@ module type Schema = sig
                string ->
                coerce:('a -> Yojson.Basic.json) ->
                ('ctx, 'a option) typ
+    [@warning "-3"]
 
   val list : ('ctx, 'src) typ -> ('ctx, 'src list option) typ
 
@@ -177,8 +201,10 @@ module type Schema = sig
   type variables = (string * Graphql_parser.const_value) list
 
   type 'a response = ('a, Yojson.Basic.json) result
+    [@warning "-3"]
 
-  val execute : 'ctx schema -> 'ctx -> ?variables:variables -> ?operation_name:string -> Graphql_parser.document -> [ `Response of Yojson.Basic.json | `Stream of Yojson.Basic.json response stream] response io
+  val execute : 'ctx schema -> 'ctx -> ?variables:variables -> ?operation_name:string -> Graphql_parser.document -> [ `Response of Yojson.Basic.json | `Stream of Yojson.Basic.json response Io.Stream.t] response Io.t
+    [@warning "-3"]
   (** [execute schema ctx variables doc] evaluates the [doc] against [schema]
       with the given context [ctx] and [variables]. *)
 end

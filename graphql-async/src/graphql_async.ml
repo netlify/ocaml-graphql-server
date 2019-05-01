@@ -1,17 +1,3 @@
-module Io = struct
-  include Async_kernel.Deferred
-
-  let bind x f = bind x ~f
-end
-
-module Stream = struct
-  type +'a io = 'a Async_kernel.Deferred.t
-  type 'a t = 'a Async_kernel.Pipe.Reader.t
-
-  let map x f = Async_kernel.Pipe.map' x ~f:(fun q ->
-    Async_kernel.Deferred.Queue.map q ~f)
-end
-
 module Err = struct
   type t = string
 
@@ -19,4 +5,20 @@ module Err = struct
   let extensions_of_error _t = []
 end
 
-module Schema = Graphql_schema.Make (Io) (Stream) (Err)
+
+module Schema = Graphql_schema.Make (struct
+  include Async_kernel.Deferred
+
+  let bind x f = bind x ~f
+
+  module Stream = struct
+    type 'a t = 'a Async_kernel.Pipe.Reader.t
+
+    let map t f = Async_kernel.Pipe.map' t ~f:(fun q ->
+      Async_kernel.Deferred.Queue.map q ~f)
+
+    let iter t f = Async_kernel.Pipe.iter t ~f
+
+    let close = Async_kernel.Pipe.close_read
+  end
+end) (Err)

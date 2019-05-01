@@ -26,6 +26,7 @@ Four OPAM packages are provided:
 - `graphql-lwt` provides the module `Graphql_lwt.Schema` with [Lwt](https://github.com/ocsigen/lwt) support in field resolvers.
 - `graphql-async` provides the module `Graphql_async.Schema` with [Async](https://github.com/janestreet/async) support in field resolvers.
 - `graphql_parser` provides query parsing functionality.
+- `graphql-cohttp` allows exposing a schema over HTTP using [Cohttp](https://github.com/mirage/ocaml-cohttp).
 
 API documentation:
 
@@ -33,6 +34,7 @@ API documentation:
 - [`graphql-lwt`](https://andreas.github.io/ocaml-graphql-server/graphql-lwt)
 - [`graphql-async`](https://andreas.github.io/ocaml-graphql-server/graphql-async)
 - [`graphql_parser`](https://andreas.github.io/ocaml-graphql-server/graphql_parser)
+- [`graphql-cohttp`](https://andreas.github.io/ocaml-graphql-server/graphql-cohttp)
 
 ## Examples
 
@@ -41,12 +43,9 @@ API documentation:
 To run a sample GraphQL server also serving GraphiQL, do the following:
 
 ```bash
-opam install graphql-lwt dune
+opam install dune graphql-lwt graphql-cohttp cohttp-lwt-unix
 git clone git@github.com:andreas/ocaml-graphql-server.git
-cd ocaml-graphql-server
-cd examples
-dune build server.exe
-dune exec ./examples/server.exe
+dune exec examples/server.exe
 ```
 
 Now open [http://localhost:8080/graphql](http://localhost:8080/graphql).
@@ -83,17 +82,17 @@ let user = Schema.(obj "user"
       ~doc:"Unique user identifier"
       ~typ:(non_null int)
       ~args:Arg.[]
-      ~resolve:(fun ctx p -> p.id)
+      ~resolve:(fun info p -> p.id)
     ;
     field "name"
       ~typ:(non_null string)
       ~args:Arg.[]
-      ~resolve:(fun ctx p -> p.name)
+      ~resolve:(fun info p -> p.name)
     ;
     field "role"
       ~typ:(non_null role)
       ~args:Arg.[]
-      ~resolve:(fun ctx p -> p.role)
+      ~resolve:(fun info p -> p.role)
   ])
 )
 
@@ -101,7 +100,7 @@ let schema = Schema.(schema [
   field "users"
     ~typ:(non_null (list (non_null user)))
     ~args:Arg.[]
-    ~resolve:(fun ctx () -> users)
+    ~resolve:(fun info () -> users)
 ])
 ```
 
@@ -142,12 +141,12 @@ let tweet = Schema.(obj "tweet"
     field "id"
       ~typ:(non_null int)
       ~args:Arg.[]
-      ~resolver:(fun ctx t -> t.id)
+      ~resolve:(fun info t -> t.id)
     ;
     field "replies"
       ~typ:(non_null (list tweet))
       ~args:Arg.[]
-      ~resolver:(fun ctx t -> t.replies)
+      ~resolve:(fun info t -> t.replies)
   ])
 )
 ```
@@ -162,14 +161,14 @@ let rec foo = lazy Schema.(obj "foo"
     field "bar"
       ~typ:Lazy.(force bar)
       ~args.Arg.[]
-      ~resolver:(fun ctx foo -> foo.bar)
+      ~resolve:(fun info foo -> foo.bar)
   ])
 and bar = lazy Schema.(obj "bar"
   ~fields:(fun _ -> [
     field "foo"
       ~typ:Lazy.(force foo)
       ~args.Arg.[]
-      ~resolver:(fun ctx bar -> bar.foo)
+      ~resolve:(fun info bar -> bar.foo)
   ])
 ```
 
@@ -185,7 +184,7 @@ let schema = Schema.(schema [
     ~args:Arg.[
       arg "duration" ~typ:float;
     ]
-    ~resolve:(fun ctx () ->
+    ~resolve:(fun info () ->
       Lwt_result.ok (Lwt_unix.sleep duration >|= fun () -> duration)
     )
 ])
@@ -204,7 +203,7 @@ let schema = Schema.(schema [
     ~args:Arg.[
       arg "duration" ~typ:float;
     ]
-    ~resolve:(fun ctx () ->
+    ~resolve:(fun info () ->
       after (Time.Span.of_float duration) >>| fun () -> duration
     )
 ])
@@ -224,7 +223,7 @@ Schema.(obj "math"
         arg  "y" ~typ:int;            (* <-- optional *)
         arg' "z" ~typ:int ~default:7  (* <-- optional w/ default *)
       ]
-      ~resolve:(fun ctx () x y z ->
+      ~resolve:(fun info () x y z ->
         let y' = match y with Some n -> n | None -> 42 in
         x + y' + z
       )
@@ -243,11 +242,32 @@ Schema.(schema [
   ~subscriptions:[
     subscription_field "user_created"
       ~typ:(non_null user)
-      ~resolve:(fun ctx ->
+      ~resolve:(fun info ->
         let user_stream, push_to_user_stream = Lwt_stream.create () in
         let destroy_stream = (fun () -> push_to_user_stream None) in
         Lwt_result.return (user_stream, destroy_stream))
     ])
+```
+
+### HTTP Server
+
+Using Lwt:
+
+```ocaml
+open Graphql_lwt
+
+let schema = Schema.(schema [
+  ...
+])
+
+module Graphql_cohttp_lwt = Graphql_cohttp.Make (Schema) (Cohttp_lwt.Body)
+
+let () =
+  let callback = Graphql_cohttp_lwt.make_callback (fun _req -> ()) schema in
+  let server = Cohttp_lwt_unix.Server.make ~callback () in
+  let mode = `TCP (`Port 8080) in
+  Cohttp_lwt_unix.Server.create ~mode server
+  |> Lwt_main.run
 ```
 
 ## Design

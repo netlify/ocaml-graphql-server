@@ -1,6 +1,4 @@
-open Lwt
-module C = Cohttp_lwt_unix
-
+open Lwt.Infix
 open Graphql_lwt
 
 type role = User | Admin
@@ -29,22 +27,22 @@ let user = Schema.(obj "user"
     field "id"
       ~args:Arg.[]
       ~typ:(non_null int)
-      ~resolve:(fun () p -> p.id)
+      ~resolve:(fun _ p -> p.id)
     ;
     field "name"
       ~args:Arg.[]
       ~typ:(non_null string)
-      ~resolve:(fun () p -> p.name)
+      ~resolve:(fun _ p -> p.name)
     ;
     field "role"
       ~args:Arg.[]
       ~typ:(non_null role)
-      ~resolve:(fun () p -> p.role)
+      ~resolve:(fun _ p -> p.role)
     ;
     field "friends"
       ~args:Arg.[]
       ~typ:(list (non_null user))
-      ~resolve:(fun () p -> Some p.friends)
+      ~resolve:(fun _ p -> Some p.friends)
   ])
 )
 
@@ -78,7 +76,7 @@ let schema = Schema.(schema [
     io_field "users"
       ~args:Arg.[]
       ~typ:(non_null (list (non_null user)))
-      ~resolve:(fun () () -> Lwt_result.return users)
+      ~resolve:(fun _ () -> Lwt_result.return users)
     ;
     field "greeter"
       ~typ:string
@@ -88,7 +86,7 @@ let schema = Schema.(schema [
           arg "name" ~typ:(non_null string)
         ]))
       ]
-      ~resolve:(fun () () (greeting, name) ->
+      ~resolve:(fun _ () (greeting, name) ->
         Some (Format.sprintf "%s, %s" greeting name)
       )
     ;
@@ -97,7 +95,7 @@ let schema = Schema.(schema [
       subscription_field "subscribe_to_user"
         ~typ:(non_null user)
         ~args:Arg.[arg' "intarg" ~typ:int ~default:42]
-        ~resolve:(fun _ctx _intarg ->
+        ~resolve:(fun _info _intarg ->
           let user_stream, push_to_user_stream = Lwt_stream.create () in
           let destroy_stream = (fun () -> push_to_user_stream None) in
           set_interval 2 (fun () ->
@@ -108,6 +106,19 @@ let schema = Schema.(schema [
     ]
 )
 
+module Graphql_cohttp_lwt = Graphql_cohttp.Make (Graphql_lwt.Schema) (Cohttp_lwt_unix.IO) (Cohttp_lwt.Body)
+
 let () =
-  Server.start ~ctx:(fun _req -> ()) schema
+  let on_exn = function
+    | Unix.Unix_error (error, func, arg) ->
+      Logs.warn (fun m ->
+        m  "Client connection error %s: %s(%S)"
+          (Unix.error_message error) func arg
+      )
+    | exn -> Logs.err (fun m -> m "Unhandled exception: %a" Fmt.exn exn)
+  in
+  let callback = Graphql_cohttp_lwt.make_callback (fun _req -> ()) schema in
+  let server = Cohttp_lwt_unix.Server.make_response_action ~callback () in
+  let mode = `TCP (`Port 8080) in
+  Cohttp_lwt_unix.Server.create ~on_exn ~mode server
   |> Lwt_main.run
