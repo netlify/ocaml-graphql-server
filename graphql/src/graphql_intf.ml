@@ -125,6 +125,7 @@ module type Schema = sig
     field : Graphql_parser.field;
     fragments : fragment_map;
     variables : variable_map;
+    operation : Graphql_parser.operation;
   }
 
   val field : ?doc:string ->

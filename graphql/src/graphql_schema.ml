@@ -364,6 +364,7 @@ module Make (Io : IO) (Err: Err) = struct
     field : Graphql_parser.field;
     fragments : fragment_map;
     variables : variable_map;
+    operation : Graphql_parser.operation;
   }
 
   type ('ctx, 'src) obj = {
@@ -1239,6 +1240,7 @@ end
     variables : variable_map;
     fragments : fragment_map;
     ctx       : 'ctx;
+    operation : Graphql_parser.operation;
   }
 
   type path = [`String of string | `Int of int] list
@@ -1397,6 +1399,7 @@ end
         field = query_field;
         fragments = ctx.fragments;
         variables = ctx.variables;
+        operation = ctx.operation;
       } in
       let resolver = field.resolve resolve_info src in
       match Arg.eval_arglist ctx.variables ~field_name:field.name field.args query_field.arguments resolver with
@@ -1479,7 +1482,8 @@ end
         ctx = ctx.ctx;
         field;
         fragments = ctx.fragments;
-        variables = ctx.variables
+        variables = ctx.variables;
+        operation = ctx.operation
       } in
       let resolver = subs_field.resolve resolve_info in
       match Arg.eval_arglist ctx.variables ~field_name:subs_field.name subs_field.args field.arguments resolver with
@@ -1597,10 +1601,11 @@ end
     let execute' schema ctx doc =
       Io.return (collect_and_validate_fragments doc) >>=? fun fragments ->
       let variables = List.fold_left (fun memo (name, value) -> StringMap.add name value memo) StringMap.empty variables in
-      let execution_ctx = { fragments; ctx; variables } in
+
       let schema' = Introspection.add_schema_field schema in
       Io.return (select_operation ?operation_name doc) >>=? fun op ->
-      execute_operation schema' execution_ctx op
+        let execution_ctx = { fragments; ctx; variables; operation = op } in
+        execute_operation schema' execution_ctx op
     in
     execute' schema ctx doc >>| to_response
 end
