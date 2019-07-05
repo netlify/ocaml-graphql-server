@@ -1352,7 +1352,7 @@ end
 
   let error_response ?path ?data ?extensions msg =
     let errors = "errors", `List [
-      error_to_json ?path msg
+      error_to_json ?path ?extensions msg
     ]
     in
     let data = match data with
