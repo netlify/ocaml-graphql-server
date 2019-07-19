@@ -380,7 +380,8 @@ module Make (Io : IO) (Err: Err) = struct
       deprecated : deprecated;
       typ        : ('ctx, 'out) typ;
       args       : ('a, 'args) Arg.arg_list;
-      resolve    : 'ctx resolve_info -> 'src -> 'args;
+      resolve    : [`Resolve of 'ctx resolve_info -> 'src -> 'args
+                   | `Resolve_with_set_child_context of (('ctx -> 'ctx) -> 'ctx) -> 'ctx resolve_info -> 'src -> 'args ];
       lift       : 'a -> ('out, err) result Io.t;
     } -> ('ctx, 'src) field
   and (_, _) typ =
@@ -483,10 +484,13 @@ module Make (Io : IO) (Err: Err) = struct
     o
 
   let field ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
-    Field { name; doc; deprecated; typ; args; resolve; lift = Io.ok }
+    Field { name; doc; deprecated; typ; args; resolve = `Resolve resolve; lift = Io.ok }
 
   let io_field ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
-    Field { name; doc; deprecated; typ; args; resolve; lift = id }
+    Field { name; doc; deprecated; typ; args; resolve = `Resolve resolve; lift = id }
+
+  let io_field_with_set_context ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
+    Field { name; doc; deprecated; typ; args; resolve = `Resolve_with_set_child_context resolve; lift = id }
 
   let abstract_field ?doc ?(deprecated=NotDeprecated) name ~typ ~args =
     AbstractField (Field { lift = Io.ok; name; doc; deprecated; typ; args; resolve = Obj.magic () })
@@ -526,7 +530,7 @@ module Make (Io : IO) (Err: Err) = struct
   let obj_of_subscription_obj {name; doc; fields} =
     let fields = List.map
       (fun (SubscriptionField {name; doc; deprecated; typ; args; resolve}) ->
-        Field { lift = Obj.magic (); name; doc; deprecated; typ; args; resolve = (fun ctx () -> resolve ctx) })
+        Field { lift = Obj.magic (); name; doc; deprecated; typ; args; resolve = `Resolve (fun ctx () -> resolve ctx) })
       fields
     in
     { name; doc; abstracts = ref []; fields = lazy fields }
@@ -743,7 +747,7 @@ module Introspection = struct
         typ = NonNullable string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (AnyEnumValue enum_value) -> enum_value.name;
+        resolve = `Resolve (fun _ (AnyEnumValue enum_value) -> enum_value.name);
       };
       Field {
         name = "description";
@@ -752,7 +756,7 @@ module Introspection = struct
         typ = string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (AnyEnumValue enum_value) -> enum_value.doc;
+        resolve = `Resolve (fun _ (AnyEnumValue enum_value) -> enum_value.doc);
       };
       Field {
         name = "isDeprecated";
@@ -761,7 +765,7 @@ module Introspection = struct
         typ = NonNullable bool;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (AnyEnumValue enum_value) -> enum_value.deprecated <> NotDeprecated;
+        resolve = `Resolve (fun _ (AnyEnumValue enum_value) -> enum_value.deprecated <> NotDeprecated);
       };
       Field {
         name = "deprecationReason";
@@ -770,10 +774,10 @@ module Introspection = struct
         typ = string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (AnyEnumValue enum_value) ->
+        resolve = `Resolve (fun _ (AnyEnumValue enum_value) ->
           match enum_value.deprecated with
           | Deprecated reason -> reason
-          | NotDeprecated -> None
+          | NotDeprecated -> None)
       }
     ]
   }
@@ -790,9 +794,9 @@ module Introspection = struct
         typ = NonNullable string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (AnyArg arg) -> match arg with
+        resolve = `Resolve (fun _ (AnyArg arg) -> match arg with
           | Arg.DefaultArg a -> a.name
-          | Arg.Arg a -> a.name
+          | Arg.Arg a -> a.name)
       };
       Field {
         name = "description";
@@ -801,9 +805,9 @@ module Introspection = struct
         typ = string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (AnyArg arg) -> match arg with
+        resolve = `Resolve (fun _ (AnyArg arg) -> match arg with
           | Arg.DefaultArg a -> a.doc
-          | Arg.Arg a -> a.doc
+          | Arg.Arg a -> a.doc)
       };
       Field {
         name = "type";
@@ -812,9 +816,9 @@ module Introspection = struct
         typ = NonNullable __type;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (AnyArg arg) -> match arg with
+        resolve = `Resolve (fun _ (AnyArg arg) -> match arg with
           | Arg.DefaultArg a -> AnyArgTyp a.typ
-          | Arg.Arg a -> AnyArgTyp a.typ
+          | Arg.Arg a -> AnyArgTyp a.typ)
       };
       Field {
         name = "defaultValue";
@@ -823,7 +827,7 @@ module Introspection = struct
         typ = string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (AnyArg _) -> None
+        resolve = `Resolve (fun _ (AnyArg _) -> None)
       }
     ]
   }
@@ -840,7 +844,7 @@ module Introspection = struct
         typ = NonNullable __type_kind;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ t -> match t with
+        resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Object _) -> `Object
           | AnyTyp (Abstract { kind = `Union; _ }) -> `Union
           | AnyTyp (Abstract { kind = `Interface _; _ }) -> `Interface
@@ -852,7 +856,7 @@ module Introspection = struct
           | AnyArgTyp (Arg.List _) -> `List
           | AnyArgTyp (Arg.Scalar _) -> `Scalar
           | AnyArgTyp (Arg.Enum _) -> `Enum
-          | AnyArgTyp (Arg.NonNullable _) -> `NonNull
+          | AnyArgTyp (Arg.NonNullable _) -> `NonNull)
       };
       Field {
         name = "name";
@@ -861,7 +865,7 @@ module Introspection = struct
         typ = string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ t -> match t with
+        resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Object o) -> Some o.name
           | AnyTyp (Scalar s) -> Some s.name
           | AnyTyp (Enum e) -> Some e.name
@@ -869,7 +873,7 @@ module Introspection = struct
           | AnyArgTyp (Arg.Object o) -> Some o.name
           | AnyArgTyp (Arg.Scalar s) -> Some s.name
           | AnyArgTyp (Arg.Enum e) -> Some e.name
-          | _ -> None;
+          | _ -> None);
       };
       Field {
         name = "description";
@@ -878,7 +882,7 @@ module Introspection = struct
         typ = string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ t -> match t with
+        resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Object o) -> o.doc
           | AnyTyp (Scalar s) -> s.doc
           | AnyTyp (Enum e) -> e.doc
@@ -886,7 +890,7 @@ module Introspection = struct
           | AnyArgTyp (Arg.Object o) -> o.doc
           | AnyArgTyp (Arg.Scalar s) -> s.doc
           | AnyArgTyp (Arg.Enum e) -> e.doc
-          | _ -> None
+          | _ -> None)
       };
       Field {
         name = "fields";
@@ -895,7 +899,7 @@ module Introspection = struct
         typ = List (NonNullable __field);
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ t -> match t with
+        resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Object o) ->
               Some (List.map (fun f -> AnyField f) (Lazy.force o.fields))
           | AnyTyp (Abstract { kind = `Interface fields; _ }) ->
@@ -903,7 +907,7 @@ module Introspection = struct
           | AnyArgTyp (Arg.Object o) ->
               let arg_list = args_to_list Lazy.(force o.fields) in
               Some (List.map (fun (AnyArg f) -> AnyArgField f) arg_list)
-          | _ -> None
+          | _ -> None)
       };
       Field {
         name = "interfaces";
@@ -912,11 +916,11 @@ module Introspection = struct
         typ = List (NonNullable __type);
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ t -> match t with
+        resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Object o) ->
               let interfaces = List.filter (function | { kind = `Interface _; _} -> true | _ -> false) !(o.abstracts) in
               Some (List.map (fun i -> AnyTyp (Abstract i)) interfaces)
-          | _ -> None
+          | _ -> None)
       };
       Field {
         name = "possibleTypes";
@@ -925,10 +929,10 @@ module Introspection = struct
         typ = List (NonNullable __type);
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ t -> match t with
+        resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Abstract a) ->
               Some a.types
-          | _ -> None
+          | _ -> None)
       };
       Field {
         name = "ofType";
@@ -937,12 +941,12 @@ module Introspection = struct
         typ = __type;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ t -> match t with
+        resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (NonNullable typ) -> Some (AnyTyp typ)
           | AnyTyp (List typ) -> Some (AnyTyp typ)
           | AnyArgTyp (Arg.NonNullable typ) -> Some (AnyArgTyp typ)
           | AnyArgTyp (Arg.List typ) -> Some (AnyArgTyp typ)
-          | _ -> None
+          | _ -> None)
       };
       Field {
         name = "inputFields";
@@ -951,10 +955,10 @@ module Introspection = struct
         typ = List (NonNullable __input_value);
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ t -> match t with
+        resolve = `Resolve (fun _ t -> match t with
           | AnyArgTyp (Arg.Object o) ->
               Some (args_to_list Lazy.(force o.fields))
-          | _ -> None
+          | _ -> None)
       };
       Field {
         name = "enumValues";
@@ -963,10 +967,10 @@ module Introspection = struct
         typ = List (NonNullable __enum_value);
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ t -> match t with
+        resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Enum e) -> Some (List.map (fun x -> AnyEnumValue x) e.values)
           | AnyArgTyp (Arg.Enum e) -> Some (List.map (fun x -> AnyEnumValue x) e.values)
-          | _      -> None
+          | _      -> None)
       }
     ]
   }
@@ -983,10 +987,10 @@ module Introspection = struct
         typ = NonNullable string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ f -> match f with
+        resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field f) -> f.name
           | AnyArgField (Arg.Arg a) -> a.name
-          | AnyArgField (Arg.DefaultArg a) -> a.name
+          | AnyArgField (Arg.DefaultArg a) -> a.name)
       };
       Field {
         name = "description";
@@ -995,10 +999,10 @@ module Introspection = struct
         typ = string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ f -> match f with
+        resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field f) -> f.doc
           | AnyArgField (Arg.Arg a) -> a.doc
-          | AnyArgField (Arg.DefaultArg a) -> a.doc
+          | AnyArgField (Arg.DefaultArg a) -> a.doc)
       };
       Field {
         name = "args";
@@ -1007,9 +1011,9 @@ module Introspection = struct
         typ = NonNullable (List (NonNullable __input_value));
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ f -> match f with
+        resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field f) -> args_to_list f.args
-          | AnyArgField _ -> []
+          | AnyArgField _ -> [])
       };
       Field {
         name = "type";
@@ -1018,10 +1022,10 @@ module Introspection = struct
         typ = NonNullable __type;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ f -> match f with
+        resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field f) -> AnyTyp f.typ
           | AnyArgField (Arg.Arg a) -> AnyArgTyp a.typ
-          | AnyArgField (Arg.DefaultArg a) -> AnyArgTyp a.typ
+          | AnyArgField (Arg.DefaultArg a) -> AnyArgTyp a.typ)
       };
       Field {
         name = "isDeprecated";
@@ -1030,9 +1034,9 @@ module Introspection = struct
         typ = NonNullable bool;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ f -> match f with
+        resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field { deprecated = Deprecated _; _ }) -> true
-          | _ -> false
+          | _ -> false)
       };
       Field {
         name = "deprecationReason";
@@ -1041,9 +1045,9 @@ module Introspection = struct
         typ = string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ f -> match f with
+        resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field { deprecated = Deprecated reason; _ }) -> reason
-          | _ -> None
+          | _ -> None)
       }
     ]
   }
@@ -1115,7 +1119,7 @@ module Introspection = struct
         typ = NonNullable string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (Directive d) -> d.name
+        resolve = `Resolve (fun _ (Directive d) -> d.name)
       };
       Field {
         name = "description";
@@ -1124,7 +1128,7 @@ module Introspection = struct
         typ = string;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (Directive d) -> d.doc
+        resolve = `Resolve (fun _ (Directive d) -> d.doc)
       };
       Field {
         name = "locations";
@@ -1133,7 +1137,7 @@ module Introspection = struct
         typ = NonNullable (List (NonNullable __directive_location));
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (Directive d) -> d.locations
+        resolve = `Resolve (fun _ (Directive d) -> d.locations)
       };
       Field {
         name = "args";
@@ -1142,7 +1146,7 @@ module Introspection = struct
         typ = NonNullable (List (NonNullable __input_value));
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ (Directive d) -> args_to_list d.args
+        resolve = `Resolve (fun _ (Directive d) -> args_to_list d.args)
       }
     ]
   }
@@ -1159,7 +1163,7 @@ module Introspection = struct
         typ = NonNullable (List (NonNullable __type));
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ s ->
+        resolve = `Resolve (fun _ s ->
           let types, _ = List.fold_left
             (fun memo op ->
               match op with
@@ -1168,7 +1172,7 @@ module Introspection = struct
             ([], StringSet.empty)
             [Some s.query; s.mutation; Option.map s.subscription ~f:obj_of_subscription_obj]
           in
-          types
+          types)
       };
       Field {
         name = "queryType";
@@ -1177,7 +1181,7 @@ module Introspection = struct
         typ = NonNullable __type;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ s -> AnyTyp (Object s.query)
+        resolve = `Resolve (fun _ s -> AnyTyp (Object s.query))
       };
       Field {
         name = "mutationType";
@@ -1186,7 +1190,7 @@ module Introspection = struct
         typ = __type;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ s -> Option.map s.mutation ~f:(fun mut -> AnyTyp (Object mut))
+        resolve = `Resolve (fun _ s -> Option.map s.mutation ~f:(fun mut -> AnyTyp (Object mut)))
       };
       Field {
         name = "subscriptionType";
@@ -1195,8 +1199,8 @@ module Introspection = struct
         typ = __type;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ s ->
-          Option.map s.subscription ~f:(fun subs -> AnyTyp (Object (obj_of_subscription_obj subs)))
+        resolve = `Resolve (fun _ s ->
+          Option.map s.subscription ~f:(fun subs -> AnyTyp (Object (obj_of_subscription_obj subs))))
       };
       Field {
         name = "directives";
@@ -1205,7 +1209,7 @@ module Introspection = struct
         typ = NonNullable (List (NonNullable __directive));
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ _ -> []
+        resolve = `Resolve (fun _ _ -> [])
       };
       Field {
         name = "subscriptionType";
@@ -1214,7 +1218,7 @@ module Introspection = struct
         typ = __type;
         args = Arg.[];
         lift = Io.ok;
-        resolve = fun _ _ -> None
+        resolve = `Resolve (fun _ _ -> None)
       }
     ]
   }
@@ -1227,7 +1231,7 @@ module Introspection = struct
       typ = NonNullable __schema;
       args = Arg.[];
       lift = Io.ok;
-      resolve = fun _ _ -> s
+      resolve = `Resolve (fun _ _ -> s)
     } in
     let fields = lazy (schema_field::(Lazy.force s.query.fields)) in
     { s with query = { s.query with fields } }
@@ -1401,13 +1405,23 @@ end
         variables = ctx.variables;
         operation = ctx.operation;
       } in
-      let resolver = field.resolve resolve_info src in
+      let ctx_ref = ref ctx.ctx in
+      let resolver = match field.resolve with
+      | `Resolve_with_set_child_context resolve ->
+         let set_child_context = (fun f ->
+           let new_ctx = (f !ctx_ref) in
+           ctx_ref := new_ctx;
+           new_ctx) in
+         resolve set_child_context resolve_info src
+      | `Resolve resolve ->
+         resolve resolve_info src
+      in
       match Arg.eval_arglist ctx.variables ~field_name:field.name field.args query_field.arguments resolver with
       | Ok unlifted_value ->
           let lifted_value =
             field.lift unlifted_value
             |> Io.Result.map_error ~f:(fun (err: err) -> `Resolve_error (err, path')) >>=? fun resolved ->
-            present ctx resolved query_field field.typ path'
+            present { ctx with ctx = !ctx_ref } resolved query_field field.typ path'
           in
           lifted_value >>| (function
           | Ok (value, errors) ->

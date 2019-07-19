@@ -144,6 +144,14 @@ module type Schema = sig
                  resolve:('ctx resolve_info -> 'src -> 'b) ->
                  ('ctx, 'src) field
 
+  val io_field_with_set_context : ?doc:string ->
+                                  ?deprecated:deprecated ->
+                                  string ->
+                                  typ:('ctx, 'a) typ ->
+                                  args:(('a, err) result Io.t, 'b) Arg.arg_list ->
+                                  resolve:((('ctx -> 'ctx) -> 'ctx) -> 'ctx resolve_info -> 'src -> 'b) ->
+                                  ('ctx, 'src) field
+
   val subscription_field : ?doc:string ->
                            ?deprecated:deprecated ->
                            string ->
