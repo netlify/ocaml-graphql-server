@@ -2,5 +2,6 @@
  (name graphql)
  (public_name graphql)
  (wrapped false)
- (libraries graphql_parser yojson rresult seq)
+ (libraries landmarks graphql_parser yojson rresult seq)
+ (preprocess (pps landmarks.ppx --auto))
  (flags (:standard -w -30-3-27)))

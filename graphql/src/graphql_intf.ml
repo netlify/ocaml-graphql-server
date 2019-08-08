@@ -36,27 +36,31 @@ module type Schema = sig
 
   type err
 
+  type ctx
+
   (** {3 Base types } *)
 
-  type 'ctx schema
+  type schema
 
-  type ('ctx, 'src) field
+  type ('src) field
 
-  type 'ctx subscription_field
+  type ('src) fast_field
 
-  type ('ctx, 'src) typ
+  type subscription_field
+
+  type ('src) typ
 
   type 'a enum_value
 
   (** {3 Constructors } *)
 
   val schema : ?mutation_name:string ->
-               ?mutations:('ctx, unit) field list ->
+               ?mutations:(unit) field list ->
                ?subscription_name:string ->
-               ?subscriptions:'ctx subscription_field list ->
+               ?subscriptions: subscription_field list ->
                ?query_name:string ->
-               ('ctx, unit) field list ->
-               'ctx schema
+               (unit) field list ->
+               schema
 
   type deprecated =
     | NotDeprecated
@@ -70,8 +74,8 @@ module type Schema = sig
 
   val obj : ?doc:string ->
             string ->
-            fields:(('ctx, 'src option) typ -> ('ctx, 'src) field list) ->
-            ('ctx, 'src option) typ
+            fields:(('src option) typ -> ('src) field list) ->
+            ('src option) typ
 
   module Arg : sig
     type _ arg
@@ -120,99 +124,110 @@ module type Schema = sig
 
   type variable_map = Graphql_parser.const_value StringMap.t
   type fragment_map = Graphql_parser.fragment StringMap.t
-  type 'ctx resolve_info = {
-    ctx : 'ctx;
+  type resolve_info = {
+    ctx : ctx;
     field : Graphql_parser.field;
     fragments : fragment_map;
     variables : variable_map;
     operation : Graphql_parser.operation;
   }
 
+  val fast_field : ?doc:string ->
+              ?deprecated:deprecated ->
+              string ->
+              typ:('a) typ ->
+              args:('a, 'b) Arg.arg_list ->
+              resolve:(resolve_info -> 'src -> 'b) ->
+              ('src) fast_field
+
+
   val field : ?doc:string ->
               ?deprecated:deprecated ->
               string ->
-              typ:('ctx, 'a) typ ->
+              typ:('a) typ ->
               args:('a, 'b) Arg.arg_list ->
-              resolve:('ctx resolve_info -> 'src -> 'b) ->
-              ('ctx, 'src) field
+              resolve:(resolve_info -> 'src -> 'b) ->
+              ('src) field
 
   val io_field : ?doc:string ->
                  ?deprecated:deprecated ->
                  string ->
-                 typ:('ctx, 'a) typ ->
+                 typ:('a) typ ->
                  args:(('a, err) result Io.t, 'b) Arg.arg_list ->
-                 resolve:('ctx resolve_info -> 'src -> 'b) ->
-                 ('ctx, 'src) field
+                 resolve:(resolve_info -> 'src -> 'b) ->
+                 ('src) field
 
   val io_field_with_set_context : ?doc:string ->
                                   ?deprecated:deprecated ->
                                   string ->
-                                  typ:('ctx, 'a) typ ->
+                                  typ:('a) typ ->
                                   args:(('a, err) result Io.t, 'b) Arg.arg_list ->
-                                  resolve:((('ctx -> 'ctx) -> 'ctx) -> 'ctx resolve_info -> 'src -> 'b) ->
-                                  ('ctx, 'src) field
+                                  resolve:(((ctx -> ctx) -> ctx) ->  resolve_info -> 'src -> 'b) ->
+                                  ('src) field
 
   val subscription_field : ?doc:string ->
                            ?deprecated:deprecated ->
                            string ->
-                           typ:('ctx, 'out) typ ->
+                           typ:('out) typ ->
                            args:(('out Io.Stream.t, err) result Io.t, 'args) Arg.arg_list ->
-                           resolve:('ctx resolve_info -> 'args) ->
-                           'ctx subscription_field
+                           resolve:(resolve_info -> 'args) ->
+                           subscription_field
 
   val enum : ?doc:string ->
              string ->
              values:'a enum_value list ->
-             ('ctx, 'a option) typ
+             ('a option) typ
 
   val scalar : ?doc:string ->
                string ->
                coerce:('a -> Yojson.Basic.json) ->
-               ('ctx, 'a option) typ
+               ('a option) typ
     [@warning "-3"]
 
-  val list : ('ctx, 'src) typ -> ('ctx, 'src list option) typ
+  val list : ('src) typ -> ('src list option) typ
 
-  val non_null : ('ctx, 'src option) typ -> ('ctx, 'src) typ
+  val non_null : ('src option) typ -> ('src) typ
 
-  type ('ctx, 'a) abstract_value
-  type ('ctx, 'a) abstract_typ = ('ctx, ('ctx, 'a) abstract_value option) typ
+  type ('a) abstract_value
+  type ('a) abstract_typ = (('a) abstract_value option) typ
 
   val union : ?doc:string ->
               string ->
-              ('ctx, 'a) abstract_typ
+              ('a) abstract_typ
 
   type abstract_field
   val abstract_field : ?doc:string ->
                        ?deprecated:deprecated ->
                        string ->
-                       typ:(_, 'a) typ ->
+                       typ:('a) typ ->
                        args:('a, _) Arg.arg_list ->
                        abstract_field
 
   val interface : ?doc:string ->
                   string ->
-                  fields:(('ctx, 'a) abstract_typ -> abstract_field list) ->
-                  ('ctx, 'a) abstract_typ
+                  fields:(('a) abstract_typ -> abstract_field list) ->
+                  ('a) abstract_typ
 
-  val add_type : ('ctx, 'a) abstract_typ ->
-                 ('ctx, 'src option) typ ->
-                 'src -> ('ctx, 'a) abstract_value
+  val add_type : ('a) abstract_typ ->
+                 ('src option) typ ->
+                 'src -> ('a) abstract_value
 
   (** {3 Built-in scalars} *)
 
-  val int    : ('ctx, int option) typ
-  val string : ('ctx, string option) typ
-  val guid   : ('ctx, string option) typ
-  val bool   : ('ctx, bool option) typ
-  val float  : ('ctx, float option) typ
+  val int    : (int option) typ
+  val string : (string option) typ
+  val guid   : (string option) typ
+  val bool   : (bool option) typ
+  val float  : (float option) typ
 
   type variables = (string * Graphql_parser.const_value) list
 
   type 'a response = ('a, Yojson.Basic.json) result
     [@warning "-3"]
 
-  val execute : 'ctx schema -> 'ctx -> ?variables:variables -> ?operation_name:string -> Graphql_parser.document -> [ `Response of Yojson.Basic.json | `Stream of Yojson.Basic.json response Io.Stream.t] response Io.t
+  val prepare_schema : schema -> schema
+
+  val execute : schema -> ctx -> ?variables:variables -> ?operation_name:string -> Graphql_parser.document -> [ `Response of Yojson.Basic.json | `Stream of Yojson.Basic.json response Io.Stream.t] response Io.t
     [@warning "-3"]
   (** [execute schema ctx variables doc] evaluates the [doc] against [schema]
       with the given context [ctx] and [variables]. *)

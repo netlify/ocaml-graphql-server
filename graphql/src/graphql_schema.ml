@@ -45,9 +45,14 @@ module type Err = sig
     val extensions_of_error : t -> (string * Yojson.Basic.json [@warning "-3"]) list
 end
 
+module type Context = sig
+    type t
+end
+
 (* Schema *)
-module Make (Io : IO) (Err: Err) = struct
+module Make (Io : IO) (Err: Err) (Context: Context) = struct
   type err = Err.t
+  type ctx = Context.t
   module Io = struct
     include Io
 
@@ -86,6 +91,8 @@ module Make (Io : IO) (Err: Err) = struct
     exception Missing_key of string
     let find_exn key t = try find key t with Not_found -> raise (Missing_key key)
     let find k t = try Some (find_exn k t) with Missing_key _ -> None
+    (* let of_list l = *)
+    (*   List.fold_left (fun acc (k,v) -> add k v acc) empty l *)
   end
 
   module StringSet = Set.Make(String)
@@ -359,40 +366,54 @@ module Make (Io : IO) (Err: Err) = struct
   }
 
   type fragment_map = Graphql_parser.fragment StringMap.t
-  type 'ctx resolve_info = {
-    ctx : 'ctx;
+  type resolve_info = {
+    ctx : ctx;
     field : Graphql_parser.field;
     fragments : fragment_map;
     variables : variable_map;
     operation : Graphql_parser.operation;
   }
 
-  type ('ctx, 'src) obj = {
+  type 'src obj = {
     name   : string;
     doc    : string option;
-    fields : ('ctx, 'src) field list Lazy.t;
+    fields : 'src field list Lazy.t;
+    fast_fields: 'src fast_field list Lazy.t;
+    fields_memo : (string, ('src field)) Hashtbl.t Lazy.t;
+    fast_fields_memo : (string, ('src fast_field)) Hashtbl.t Lazy.t;
     abstracts : abstract list ref;
   }
-  and (_, _) field =
+  and _ field =
     Field : {
       name       : string;
       doc        : string option;
       deprecated : deprecated;
-      typ        : ('ctx, 'out) typ;
+      typ        : 'out typ;
       args       : ('a, 'args) Arg.arg_list;
-      resolve    : [`Resolve of 'ctx resolve_info -> 'src -> 'args
-                   | `Resolve_with_set_child_context of (('ctx -> 'ctx) -> 'ctx) -> 'ctx resolve_info -> 'src -> 'args ];
+      resolve    : [`Resolve of resolve_info -> 'src -> 'args
+                   | `Resolve_with_set_child_context of ((ctx -> ctx) -> ctx) -> resolve_info -> 'src -> 'args ];
       lift       : 'a -> ('out, err) result Io.t;
-    } -> ('ctx, 'src) field
-  and (_, _) typ =
-    | Object      : ('ctx, 'src) obj -> ('ctx, 'src option) typ
-    | List        : ('ctx, 'src) typ -> ('ctx, 'src list option) typ
-    | NonNullable : ('ctx, 'src option) typ -> ('ctx, 'src) typ
-    | Scalar      : 'src scalar -> ('ctx, 'src option) typ
-    | Enum        : 'src enum -> ('ctx, 'src option) typ
-    | Abstract    : abstract -> ('ctx, ('ctx, 'a) abstract_value option) typ
+    } -> 'src field
+  and _ fast_field =
+    FastField : {
+      name       : string;
+      doc        : string option;
+      deprecated : deprecated;
+      typ        : 'out typ;
+      args       : ('a, 'args) Arg.arg_list;
+      resolve    : [`Resolve of  resolve_info -> 'src -> 'args
+                   | `Resolve_with_set_child_context of ((ctx -> ctx) -> ctx) -> resolve_info -> 'src -> 'args ];
+      lift       : 'a -> ('out, err) result;
+    } -> 'src fast_field
+  and _ typ =
+    | Object      : 'src obj -> 'src option typ
+    | List        : 'src typ -> ('src list option) typ
+    | NonNullable : ('src option) typ -> 'src typ
+    | Scalar      : 'src scalar -> ('src option) typ
+    | Enum        : 'src enum -> ('src option) typ
+    | Abstract    : abstract -> ('a abstract_value option) typ
   and any_typ =
-    | AnyTyp : (_, _) typ -> any_typ
+    | AnyTyp : _ typ -> any_typ
     | AnyArgTyp : _ Arg.arg_typ -> any_typ
   and abstract = {
     name   : string;
@@ -401,27 +422,27 @@ module Make (Io : IO) (Err: Err) = struct
     mutable types  : any_typ list;
   }
   and abstract_field =
-    AbstractField : (_, _) field -> abstract_field
-  and ('ctx, 'a) abstract_value =
-    AbstractValue : ('ctx, 'src option) typ * 'src -> ('ctx, 'a) abstract_value
+    AbstractField : _ field -> abstract_field
+  and 'a abstract_value =
+    AbstractValue : ('src option) typ * 'src -> 'a abstract_value
 
-  type 'ctx subscription_field =
+  type subscription_field =
     SubscriptionField : {
       name       : string;
       doc        : string option;
       deprecated : deprecated;
-      typ        : ('ctx, 'out) typ;
+      typ        : 'out typ;
       args       : (('out Io.Stream.t, err) result Io.t, 'args) Arg.arg_list;
-      resolve    : 'ctx resolve_info -> 'args;
-    } -> 'ctx subscription_field
+      resolve    : resolve_info -> 'args;
+    } -> subscription_field
 
-  type 'ctx subscription_obj = {
+  type subscription_obj = {
     name   : string;
     doc    : string option;
-    fields : 'ctx subscription_field list;
+    fields : subscription_field list;
   }
 
-  type ('ctx, 'a) abstract_typ = ('ctx, ('ctx, 'a) abstract_value option) typ
+  type 'a abstract_typ = ('a abstract_value option) typ
 
   type directive_location = [
     | `Query
@@ -443,10 +464,11 @@ module Make (Io : IO) (Err: Err) = struct
       resolve    : 'args;
     } -> directive
 
-  type 'ctx schema = {
-    query : ('ctx, unit) obj;
-    mutation : ('ctx, unit) obj option;
-    subscription : 'ctx subscription_obj option;
+  type schema = {
+    query : unit obj;
+    mutation : unit obj option;
+    subscription : subscription_obj option;
+
   }
 
   let schema ?(mutation_name="mutation")
@@ -460,13 +482,28 @@ module Make (Io : IO) (Err: Err) = struct
       doc = None;
       abstracts = ref [];
       fields = lazy fields;
+      fast_fields = lazy [];
+      fast_fields_memo = (lazy (Hashtbl.create 1));
+      fields_memo = (lazy (List.fold_left (fun acc (field: ('a) field) ->
+                                           Hashtbl.add acc (match field with | Field f -> f.name) field;
+                                           acc)
+                                           (Hashtbl.create (List.length fields))
+                                           fields));
     };
     mutation = Option.map mutations ~f:(fun fields ->
       {
         name = mutation_name;
         doc = None;
         abstracts = ref [];
+        fast_fields = lazy [];
         fields = lazy fields;
+        fast_fields_memo = (lazy (Hashtbl.create 1));
+        fields_memo = (lazy (List.fold_left (fun acc (field: ('a) field) ->
+                                           Hashtbl.add acc (match field with | Field f -> f.name) field;
+                                           acc)
+                                           (Hashtbl.create (List.length fields))
+                                           fields));
+
       }
     );
     subscription = Option.map subscriptions ~f:(fun fields ->
@@ -480,8 +517,29 @@ module Make (Io : IO) (Err: Err) = struct
 
   (* Constructor functions *)
   let obj ?doc name ~fields =
-    let rec o = Object { name; doc; fields = lazy (fields o); abstracts = ref []} in
+    let rec o = Object { name; doc; fields = resolved_fields; fast_fields = lazy []; fields_memo = fields_memo;       fast_fields_memo = (lazy (Hashtbl.create 1)); abstracts = ref [];} and
+        resolved_fields = lazy (fields o) and
+        fields_memo = (lazy (
+                           print_endline ("Forcing fields for " ^ name);
+                           (List.fold_left (fun acc (field: ('a) field) ->
+                                           Hashtbl.add acc (match field with | Field f -> f.name) field;
+                                           acc)
+                                           (Hashtbl.create (List.length (Lazy.force resolved_fields)))
+                                           (Lazy.force resolved_fields)))) in
     o
+
+  let fast_obj ?doc name ~fields =
+    let rec o = Object { name; doc; fields = lazy []; fast_fields = resolved_fields; fast_fields_memo = fast_fields_memo; fields_memo = lazy (Hashtbl.create 1); abstracts = ref [];} and
+        resolved_fields = lazy (fields o) and
+        fast_fields_memo = (lazy (
+                           print_endline ("Forcing fields for " ^ name);
+                           (List.fold_left (fun acc (field: ('a) fast_field) ->
+                                           Hashtbl.add acc (match field with | FastField f -> f.name) field;
+                                           acc)
+                                           (Hashtbl.create (List.length (Lazy.force resolved_fields)))
+                                           (Lazy.force resolved_fields)))) in
+    o
+
 
   let field ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
     Field { name; doc; deprecated; typ; args; resolve = `Resolve resolve; lift = Io.ok }
@@ -491,6 +549,9 @@ module Make (Io : IO) (Err: Err) = struct
 
   let io_field_with_set_context ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
     Field { name; doc; deprecated; typ; args; resolve = `Resolve_with_set_child_context resolve; lift = id }
+
+  let fast_field ?doc ?(deprecated=NotDeprecated) name ~typ ~args ~resolve =
+    FastField { name; doc; deprecated; typ; args; resolve = `Resolve resolve; lift = (fun x -> Ok x)}
 
   let abstract_field ?doc ?(deprecated=NotDeprecated) name ~typ ~args =
     AbstractField (Field { lift = Io.ok; name; doc; deprecated; typ; args; resolve = Obj.magic () })
@@ -533,34 +594,39 @@ module Make (Io : IO) (Err: Err) = struct
         Field { lift = Obj.magic (); name; doc; deprecated; typ; args; resolve = `Resolve (fun ctx () -> resolve ctx) })
       fields
     in
-    { name; doc; abstracts = ref []; fields = lazy fields }
+    { name; doc; abstracts = ref []; fields = lazy fields; fast_fields = lazy []; fast_fields_memo = lazy (Hashtbl.create 1); fields_memo = (lazy (List.fold_left (fun acc (field: ('a) field) ->
+                                           Hashtbl.add acc (match field with | Field f -> f.name) field;
+                                           acc)
+                                           (Hashtbl.create (List.length fields))
+                                           fields));
+}
 
   (* Built-in scalars *)
-  let int : 'ctx. ('ctx, int option) typ = Scalar {
+  let int : (int option) typ = Scalar {
     name   = "Int";
     doc    = None;
     coerce = fun i -> `Int i;
   }
 
-  let string : 'ctx. ('ctx, string option) typ = Scalar {
+  let string : (string option) typ = Scalar {
     name   = "String";
     doc    = None;
     coerce = fun s ->`String s;
   }
 
-  let bool : 'ctx. ('ctx, bool option) typ = Scalar {
+  let bool : (bool option) typ = Scalar {
     name   = "Boolean";
     doc    = None;
     coerce = fun b -> `Bool b;
   }
 
-  let float : 'ctx. ('ctx, float option) typ = Scalar {
+  let float : (float option) typ = Scalar {
     name   = "Float";
     doc    = None;
     coerce = fun f -> `Float f;
   }
 
-  let guid : 'ctx. ('ctx, string option) typ = Scalar {
+  let guid : (string option) typ = Scalar {
     name   = "ID";
     doc    = None;
     coerce = fun x -> `String x;
@@ -594,72 +660,72 @@ module Make (Io : IO) (Err: Err) = struct
 module Introspection = struct
   (* any_typ, any_field and any_arg hide type parameters to avoid scope escaping errors *)
   type any_field =
-    | AnyField : (_, _) field -> any_field
+    | AnyField : (_) field -> any_field
     | AnyArgField : _ Arg.arg -> any_field
   type any_arg = AnyArg : _ Arg.arg -> any_arg
   type any_enum_value = AnyEnumValue : _ enum_value -> any_enum_value
 
-  let unless_visited (result, visited) name f =
-    if StringSet.mem name visited then
-      result, visited
+  let ok = (fun x -> (Ok x))
+
+  let unless_visited memo name f =
+    if StringMap.mem name memo then
+      memo
     else
-      f (result, visited)
+      f memo
 
   (* Extracts all types contained in a single type *)
-  let rec types : type ctx src. ?memo:(any_typ list * StringSet.t) -> (ctx, src) typ -> (any_typ list * StringSet.t) = fun ?(memo=([], StringSet.empty)) typ ->
+  let rec types : type src. ?memo: any_typ StringMap.t -> (src) typ -> any_typ StringMap.t = fun ?(memo=StringMap.empty) typ ->
     match typ with
     | List typ -> types ~memo typ
     | NonNullable typ -> types ~memo typ
     | Scalar s as scalar ->
-        unless_visited memo s.name (fun (result, visited) ->
-          (AnyTyp scalar)::result, StringSet.add s.name visited
+        unless_visited memo s.name (fun memo' ->
+          StringMap.add s.name (AnyTyp scalar) memo'
         )
     | Enum e as enum ->
-        unless_visited memo e.name (fun (result, visited) ->
-          (AnyTyp enum)::result, StringSet.add e.name visited
+        unless_visited memo e.name (fun memo' ->
+          StringMap.add e.name (AnyTyp enum) memo'
         )
     | Object o as obj ->
-        unless_visited memo o.name (fun (result, visited) ->
-          let result'  = (AnyTyp obj)::result in
-          let visited' = StringSet.add o.name visited in
+        unless_visited memo o.name (fun memo' ->
+          let memo'' = StringMap.add o.name (AnyTyp obj) memo' in
           let reducer = fun memo (Field f) ->
             let memo' = types ~memo f.typ in
             arg_list_types memo' f.args
           in
-          let memo' = List.fold_left reducer (result', visited') (Lazy.force o.fields) in
+          let memo' = List.fold_left reducer memo'' (Lazy.force o.fields) in
           let abstracts_reducer = fun memo a ->
             types ~memo (Abstract a)
           in
           List.fold_left abstracts_reducer memo' !(o.abstracts)
         )
    | Abstract a as abstract ->
-      unless_visited memo a.name (fun (result, visited) ->
-        let result' = (AnyTyp abstract)::result in
-        let visited' = StringSet.add a.name visited in
+      unless_visited memo a.name (fun memo' ->
+        let memo'' = StringMap.add a.name (AnyTyp abstract) memo' in
         List.fold_left (fun memo typ -> match typ with
           | AnyTyp typ -> types ~memo typ
           | AnyArgTyp _ -> failwith "Abstracts can't have argument types")
-          (result', visited') a.types
+          memo'' a.types
       )
 
-  and arg_types : type a. (any_typ list * StringSet.t) -> a Arg.arg_typ -> (any_typ list * StringSet.t) = fun memo argtyp ->
+  and arg_types : type a. any_typ StringMap.t -> a Arg.arg_typ -> any_typ StringMap.t = fun memo argtyp ->
     match argtyp with
     | Arg.List typ -> arg_types memo typ
     | Arg.NonNullable typ -> arg_types memo typ
     | Arg.Scalar s as scalar ->
-        unless_visited memo s.name (fun (result, visited) ->
-          (AnyArgTyp scalar)::result, StringSet.add s.name visited
+        unless_visited memo s.name (fun memo' ->
+          StringMap.add s.name (AnyArgTyp scalar) memo'
         )
     | Arg.Enum e as enum ->
-        unless_visited memo e.name (fun (result, visited) ->
-          (AnyArgTyp enum)::result, StringSet.add e.name visited
+        unless_visited memo e.name (fun memo' ->
+          StringMap.add e.name (AnyArgTyp enum) memo'
         )
     | Arg.Object o as obj ->
-        unless_visited memo o.name (fun (result, visited) ->
-          let memo' = (AnyArgTyp obj)::result, StringSet.add o.name visited in
-          arg_list_types memo' Lazy.(force o.fields)
+        unless_visited memo o.name (fun memo' ->
+          let memo'' = StringMap.add o.name (AnyArgTyp obj) memo' in
+          arg_list_types memo'' Lazy.(force o.fields)
         )
-  and arg_list_types : type a b. (any_typ list * StringSet.t) -> (a, b) Arg.arg_list -> (any_typ list * StringSet.t) = fun memo arglist ->
+  and arg_list_types : type a b. any_typ StringMap.t -> (a, b) Arg.arg_list -> any_typ StringMap.t = fun memo arglist ->
     let open Arg in
     match arglist with
     | [] -> memo
@@ -678,7 +744,7 @@ module Introspection = struct
         let memo' = List.cons (AnyArg arg) memo in
         args_to_list ~memo:memo' args
 
-  let no_abstracts = ref []
+  (* let no_abstracts = ref [] *)
 
   let __type_kind = Enum {
     name = "__TypeKind";
@@ -735,115 +801,107 @@ module Introspection = struct
     ]
   }
 
-  let __enum_value : 'ctx. ('ctx, any_enum_value option) typ = Object {
-    name = "__EnumValue";
-    doc = None;
-    abstracts = no_abstracts;
-    fields = lazy [
-      Field {
+  let __enum_value : (any_enum_value option) typ = fast_obj  "__EnumValue" ~fields: (fun _ ->
+    [
+      FastField {
         name = "name";
         doc = None;
         deprecated = NotDeprecated;
         typ = NonNullable string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (AnyEnumValue enum_value) -> enum_value.name);
       };
-      Field {
+      FastField {
         name = "description";
         doc = None;
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (AnyEnumValue enum_value) -> enum_value.doc);
       };
-      Field {
+      FastField {
         name = "isDeprecated";
         doc = None;
         deprecated = NotDeprecated;
         typ = NonNullable bool;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (AnyEnumValue enum_value) -> enum_value.deprecated <> NotDeprecated);
       };
-      Field {
+      FastField {
         name = "deprecationReason";
         doc = None;
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (AnyEnumValue enum_value) ->
           match enum_value.deprecated with
           | Deprecated reason -> reason
           | NotDeprecated -> None)
       }
-    ]
-  }
+    ])
 
-  let rec __input_value : 'ctx. ('ctx, any_arg option) typ = Object {
-    name = "__InputValue";
-    doc = None;
-    abstracts = no_abstracts;
-    fields = lazy [
-      Field {
+  let rec __input_value : (any_arg option) typ Lazy.t = lazy (fast_obj
+    "__InputValue"
+    ~fields: (fun _ -> [
+      FastField {
         name = "name";
         doc = None;
         deprecated = NotDeprecated;
         typ = NonNullable string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (AnyArg arg) -> match arg with
           | Arg.DefaultArg a -> a.name
           | Arg.Arg a -> a.name)
       };
-      Field {
+      FastField {
         name = "description";
         doc = None;
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (AnyArg arg) -> match arg with
           | Arg.DefaultArg a -> a.doc
           | Arg.Arg a -> a.doc)
       };
-      Field {
+      FastField {
         name = "type";
         doc = None;
         deprecated = NotDeprecated;
-        typ = NonNullable __type;
+        typ = NonNullable (Lazy.force __type);
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (AnyArg arg) -> match arg with
           | Arg.DefaultArg a -> AnyArgTyp a.typ
           | Arg.Arg a -> AnyArgTyp a.typ)
       };
-      Field {
+      FastField {
         name = "defaultValue";
         doc = None;
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (AnyArg _) -> None)
       }
-    ]
-  }
+    ]))
 
-  and __type : 'ctx . ('ctx, any_typ option) typ = Object {
-    name = "__Type";
-    doc = None;
-    abstracts = no_abstracts;
-    fields = lazy [
-      Field {
+
+  and __type : (any_typ option) typ Lazy.t = lazy (fast_obj
+    "__Type"
+    ~fields: (fun _ -> [
+      FastField {
         name = "kind";
         doc = None;
         deprecated = NotDeprecated;
         typ = NonNullable __type_kind;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Object _) -> `Object
           | AnyTyp (Abstract { kind = `Union; _ }) -> `Union
@@ -858,13 +916,13 @@ module Introspection = struct
           | AnyArgTyp (Arg.Enum _) -> `Enum
           | AnyArgTyp (Arg.NonNullable _) -> `NonNull)
       };
-      Field {
+      FastField {
         name = "name";
         doc = None;
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Object o) -> Some o.name
           | AnyTyp (Scalar s) -> Some s.name
@@ -875,13 +933,13 @@ module Introspection = struct
           | AnyArgTyp (Arg.Enum e) -> Some e.name
           | _ -> None);
       };
-      Field {
+      FastField {
         name = "description";
         doc = None;
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Object o) -> o.doc
           | AnyTyp (Scalar s) -> s.doc
@@ -892,14 +950,15 @@ module Introspection = struct
           | AnyArgTyp (Arg.Enum e) -> e.doc
           | _ -> None)
       };
-      Field {
+      FastField {
         name = "fields";
         doc = None;
         deprecated = NotDeprecated;
-        typ = List (NonNullable __field);
+        typ = List (NonNullable (Lazy.force __field));
         args = Arg.[];
-        lift = Io.ok;
-        resolve = `Resolve (fun _ t -> match t with
+        lift = ok;
+        resolve = `Resolve (fun _ t ->
+                            let res = match t with
           | AnyTyp (Object o) ->
               Some (List.map (fun f -> AnyField f) (Lazy.force o.fields))
           | AnyTyp (Abstract { kind = `Interface fields; _ }) ->
@@ -907,40 +966,42 @@ module Introspection = struct
           | AnyArgTyp (Arg.Object o) ->
               let arg_list = args_to_list Lazy.(force o.fields) in
               Some (List.map (fun (AnyArg f) -> AnyArgField f) arg_list)
-          | _ -> None)
+          | _ -> None in
+
+                           res)
       };
-      Field {
+      FastField {
         name = "interfaces";
         doc = None;
         deprecated = NotDeprecated;
-        typ = List (NonNullable __type);
+        typ = List (NonNullable (Lazy.force __type));
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Object o) ->
               let interfaces = List.filter (function | { kind = `Interface _; _} -> true | _ -> false) !(o.abstracts) in
               Some (List.map (fun i -> AnyTyp (Abstract i)) interfaces)
           | _ -> None)
       };
-      Field {
+      FastField {
         name = "possibleTypes";
         doc = None;
         deprecated = NotDeprecated;
-        typ = List (NonNullable __type);
+        typ = List (NonNullable (Lazy.force __type));
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Abstract a) ->
               Some a.types
           | _ -> None)
       };
-      Field {
+      FastField {
         name = "ofType";
         doc = None;
         deprecated = NotDeprecated;
-        typ = __type;
+        typ = (Lazy.force __type);
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (NonNullable typ) -> Some (AnyTyp typ)
           | AnyTyp (List typ) -> Some (AnyTyp typ)
@@ -948,109 +1009,111 @@ module Introspection = struct
           | AnyArgTyp (Arg.List typ) -> Some (AnyArgTyp typ)
           | _ -> None)
       };
-      Field {
+      FastField {
         name = "inputFields";
         doc = None;
         deprecated = NotDeprecated;
-        typ = List (NonNullable __input_value);
+        typ = List (NonNullable (Lazy.force __input_value));
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ t -> match t with
           | AnyArgTyp (Arg.Object o) ->
               Some (args_to_list Lazy.(force o.fields))
           | _ -> None)
       };
-      Field {
+      FastField {
         name = "enumValues";
         doc = None;
         deprecated = NotDeprecated;
         typ = List (NonNullable __enum_value);
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ t -> match t with
           | AnyTyp (Enum e) -> Some (List.map (fun x -> AnyEnumValue x) e.values)
           | AnyArgTyp (Arg.Enum e) -> Some (List.map (fun x -> AnyEnumValue x) e.values)
           | _      -> None)
       }
-    ]
-  }
+    ]))
 
-  and __field : 'ctx. ('ctx, any_field option) typ = Object {
-    name = "__Field";
-    doc = None;
-    abstracts = no_abstracts;
-    fields = lazy [
-      Field {
+
+  and __field : (any_field option) typ Lazy.t = lazy (fast_obj
+    "__Field"
+    ~fields: (fun _ -> [
+      FastField {
         name = "name";
         doc = None;
         deprecated = NotDeprecated;
         typ = NonNullable string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field f) -> f.name
           | AnyArgField (Arg.Arg a) -> a.name
           | AnyArgField (Arg.DefaultArg a) -> a.name)
       };
-      Field {
+      FastField {
         name = "description";
         doc = None;
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field f) -> f.doc
           | AnyArgField (Arg.Arg a) -> a.doc
           | AnyArgField (Arg.DefaultArg a) -> a.doc)
       };
-      Field {
+      FastField {
         name = "args";
         doc = None;
         deprecated = NotDeprecated;
-        typ = NonNullable (List (NonNullable __input_value));
+        typ = NonNullable (List (NonNullable (Lazy.force __input_value)));
         args = Arg.[];
-        lift = Io.ok;
-        resolve = `Resolve (fun _ f -> match f with
+        lift = ok;
+        resolve = `Resolve (fun _ f ->
+                            let res =
+                            match f with
           | AnyField (Field f) -> args_to_list f.args
-          | AnyArgField _ -> [])
+          | AnyArgField _ -> [] in
+
+        res)
       };
-      Field {
+      FastField {
         name = "type";
         doc = None;
         deprecated = NotDeprecated;
-        typ = NonNullable __type;
+        typ = NonNullable (Lazy.force __type);
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field f) -> AnyTyp f.typ
           | AnyArgField (Arg.Arg a) -> AnyArgTyp a.typ
           | AnyArgField (Arg.DefaultArg a) -> AnyArgTyp a.typ)
       };
-      Field {
+      FastField {
         name = "isDeprecated";
         doc = None;
         deprecated = NotDeprecated;
         typ = NonNullable bool;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field { deprecated = Deprecated _; _ }) -> true
           | _ -> false)
       };
-      Field {
+      FastField {
         name = "deprecationReason";
         doc = None;
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ f -> match f with
           | AnyField (Field { deprecated = Deprecated reason; _ }) -> reason
           | _ -> None)
       }
-    ]
-  }
+    ]))
+
 
   let __directive_location = Enum {
     name = "__DirectiveLocation";
@@ -1107,143 +1170,156 @@ module Introspection = struct
     ]
   }
 
-  let __directive = Object {
-    name = "__Directive";
-    doc = None;
-    abstracts = no_abstracts;
-    fields = lazy [
-      Field {
+  let __directive = fast_obj
+    "__Directive"
+    ~fields: (fun _ -> [
+      FastField {
         name = "name";
         doc = None;
         deprecated = NotDeprecated;
         typ = NonNullable string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (Directive d) -> d.name)
       };
-      Field {
+      FastField {
         name = "description";
         doc = None;
         deprecated = NotDeprecated;
         typ = string;
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (Directive d) -> d.doc)
       };
-      Field {
+      FastField {
         name = "locations";
         doc = None;
         deprecated = NotDeprecated;
         typ = NonNullable (List (NonNullable __directive_location));
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (Directive d) -> d.locations)
       };
-      Field {
+      FastField {
         name = "args";
         doc = None;
         deprecated = NotDeprecated;
-        typ = NonNullable (List (NonNullable __input_value));
+        typ = NonNullable (List (NonNullable (Lazy.force __input_value)));
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ (Directive d) -> args_to_list d.args)
       }
-    ]
-  }
+    ])
 
-  let __schema : 'ctx. ('ctx, 'ctx schema option) typ = Object {
-    name = "__Schema";
-    doc = None;
-    abstracts = no_abstracts;
-    fields = lazy [
-      Field {
+  let __schema_fields: (schema * any_typ StringMap.t) fast_field list = [
+      FastField {
         name = "types";
         doc = None;
         deprecated = NotDeprecated;
-        typ = NonNullable (List (NonNullable __type));
+        typ = NonNullable (List (NonNullable (Lazy.force __type)));
         args = Arg.[];
-        lift = Io.ok;
-        resolve = `Resolve (fun _ s ->
-          let types, _ = List.fold_left
-            (fun memo op ->
-              match op with
-              | None -> memo
-              | Some op -> types ~memo (Object op))
-            ([], StringSet.empty)
-            [Some s.query; s.mutation; Option.map s.subscription ~f:obj_of_subscription_obj]
-          in
-          types)
+        lift = ok;
+        resolve = `Resolve (fun _ (s, types) ->
+          (* let types = List.fold_left *)
+          (*   (fun memo op -> *)
+          (*     match op with *)
+          (*     | None -> memo *)
+          (*     | Some op -> types ~memo (Object op)) *)
+          (*   StringMap.empty *)
+          (*   [Some s.query; s.mutation; Option.map s.subscription ~f:obj_of_subscription_obj] *)
+          (* in *)
+          (List.map (fun (_, vs) -> vs) (StringMap.bindings types)))
       };
-      Field {
+      FastField {
         name = "queryType";
         doc = None;
         deprecated = NotDeprecated;
-        typ = NonNullable __type;
+        typ = NonNullable (Lazy.force __type);
         args = Arg.[];
-        lift = Io.ok;
-        resolve = `Resolve (fun _ s -> AnyTyp (Object s.query))
+        lift = ok;
+        resolve = `Resolve (fun _ (s, _) -> AnyTyp (Object s.query))
       };
-      Field {
+      FastField {
         name = "mutationType";
         doc = None;
         deprecated = NotDeprecated;
-        typ = __type;
+        typ = (Lazy.force __type);
         args = Arg.[];
-        lift = Io.ok;
-        resolve = `Resolve (fun _ s -> Option.map s.mutation ~f:(fun mut -> AnyTyp (Object mut)))
+        lift = ok;
+        resolve = `Resolve (fun _ (s, _) -> Option.map s.mutation ~f:(fun mut -> AnyTyp (Object mut)))
       };
-      Field {
+      FastField {
         name = "subscriptionType";
         doc = None;
         deprecated = NotDeprecated;
-        typ = __type;
+        typ = (Lazy.force __type);
         args = Arg.[];
-        lift = Io.ok;
-        resolve = `Resolve (fun _ s ->
+        lift = ok;
+        resolve = `Resolve (fun _ (s, _) ->
           Option.map s.subscription ~f:(fun subs -> AnyTyp (Object (obj_of_subscription_obj subs))))
       };
-      Field {
+      FastField {
         name = "directives";
         doc = None;
         deprecated = NotDeprecated;
         typ = NonNullable (List (NonNullable __directive));
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ _ -> [])
       };
-      Field {
+      FastField {
         name = "subscriptionType";
         doc = None;
         deprecated = NotDeprecated;
-        typ = __type;
+        typ = (Lazy.force __type);
         args = Arg.[];
-        lift = Io.ok;
+        lift = ok;
         resolve = `Resolve (fun _ _ -> None)
       }
     ]
-  }
+
+ let __schema : ((schema * any_typ StringMap.t) option) typ = fast_obj
+    "__Schema"
+    ~fields: (fun _ -> __schema_fields)
 
   let add_schema_field s =
-    let schema_field = Field {
+    let types = List.fold_left
+      (fun memo op ->
+        match op with
+        | None -> memo
+        | Some op -> types ~memo (Object op))
+      StringMap.empty
+      [Some s.query; s.mutation; Option.map s.subscription ~f:obj_of_subscription_obj]
+    in
+
+    let schema_field = FastField {
       name = "__schema";
       doc = None;
       deprecated = NotDeprecated;
       typ = NonNullable __schema;
       args = Arg.[];
-      lift = Io.ok;
-      resolve = `Resolve (fun _ _ -> s)
+      lift = ok;
+      resolve = `Resolve (fun _ _ -> (s, types))
     } in
-    let fields = lazy (schema_field::(Lazy.force s.query.fields)) in
-    { s with query = { s.query with fields } }
+    (* let fields = schema_field::(Lazy.force s.query.fields) in *)
+    (* let fields_memo = (lazy (List.fold_left (fun acc (field: ('a) field) -> *)
+    (*                                        Hashtbl.add acc (match field with | Field f -> f.name) field; *)
+    (*                                        acc) *)
+    (*                                        (Hashtbl.create (List.length fields)) *)
+    (*                                        fields)) in *)
+    (* { s with query = { s.query with fields = lazy fields; fields_memo = fields_memo } } *)
+    let fast_fields_memo = Hashtbl.create 1 in
+    Hashtbl.add fast_fields_memo "__schema" schema_field;
+    { s with query = { s.query with fast_fields = lazy [schema_field]; fast_fields_memo = lazy fast_fields_memo } }
 end
 
   (* Execution *)
   type variables = (string * Graphql_parser.const_value) list
   type execution_order = Serial | Parallel
-  type 'ctx execution_context = {
+  type execution_context = {
     variables : variable_map;
     fragments : fragment_map;
-    ctx       : 'ctx;
+    ctx       : ctx;
     operation : Graphql_parser.operation;
   }
 
@@ -1267,7 +1343,7 @@ end
 
   type 'a response = ('a, json) result
 
-  let matches_type_condition type_condition (obj : ('ctx, 'src) obj) =
+  let matches_type_condition type_condition (obj : ('src) obj) =
     obj.name = type_condition ||
       List.exists (fun (abstract : abstract) -> abstract.name = type_condition) !(obj.abstracts)
 
@@ -1288,10 +1364,15 @@ end
       | `Skip -> Ok false
       | `Include -> should_include_field ctx rest
 
-  let rec collect_fields : 'ctx execution_context -> ('ctx, 'src) obj -> Graphql_parser.selection list -> (Graphql_parser.field list, string) result =
+  let collect_fields_memo = Hashtbl.create(2000)
+
+  let rec collect_fields : execution_context -> ('src) obj -> Graphql_parser.selection list -> (Graphql_parser.field list, string) result =
     fun ctx obj fields ->
+    match (Hashtbl.find_opt collect_fields_memo (obj.name, fields)) with
+    | Some x -> x
+    | None ->
     let open Rresult in
-    List.map (function
+    let res = List.map (function
     | Graphql_parser.Field field ->
         should_include_field ctx field.directives >>| fun include_field ->
           if include_field then [field] else []
@@ -1319,15 +1400,23 @@ end
           Ok []
     ) fields
     |> List.Result.join
-    |> Rresult.R.map List.concat
+              |> Rresult.R.map List.concat in
+    Hashtbl.add collect_fields_memo (obj.name, fields) res;
+    res
+
 
   let alias_or_name : Graphql_parser.field -> string = fun field ->
     match field.alias with
     | Some alias -> alias
     | None -> field.name
 
-  let field_from_object : ('ctx, 'src) obj -> string -> ('ctx, 'src) field option = fun obj field_name ->
-    List.find (fun (Field field) -> field.name = field_name) (Lazy.force obj.fields)
+  let field_from_object : ('src) obj -> string -> ('src) field option =
+    (fun obj field_name ->
+     Hashtbl.find_opt (Lazy.force obj.fields_memo) field_name)
+
+  let fast_field_from_object : ('src) obj -> string -> ('src) fast_field option =
+    (fun obj field_name ->
+     Hashtbl.find_opt (Lazy.force obj.fast_fields_memo) field_name)
 
   let field_from_subscription_object = fun obj field_name ->
     List.find (fun (SubscriptionField field) -> field.name = field_name) obj.fields
@@ -1365,12 +1454,16 @@ end
     in
     `Assoc (errors :: data)
 
-  let rec present : type ctx src. ctx execution_context -> src -> Graphql_parser.field -> (ctx, src) typ -> path -> (json * error list, [> resolve_error]) result Io.t =
+  let rec present : type src. execution_context -> src -> Graphql_parser.field -> (src) typ -> path -> (json * error list, [> resolve_error]) result Io.t =
     fun ctx src query_field typ path ->
       match typ with
-      | Scalar s -> coerce_or_null src (fun x -> Io.ok (s.coerce x, []))
+      | Scalar s -> (match src with
+                    | None -> Io.ok (`Null, [])
+                    | Some src' -> Io.ok (s.coerce src', []))
       | List t ->
-          coerce_or_null src (fun src' ->
+          (match src with
+           | None -> Io.ok (`Null, [])
+           | Some src' ->
             List.mapi (fun i x -> present ctx x query_field t ((`Int i)::path)) src'
             |> Io.all
             |> Io.map ~f:List.Result.join
@@ -1378,22 +1471,28 @@ end
           )
       | NonNullable t -> present ctx (Some src) query_field t path
       | Object o ->
-          coerce_or_null src (fun src' ->
+         (match src with
+          | None -> Io.ok (`Null, [])
+          | Some src' ->
             match collect_fields ctx o query_field.selection_set with
             | Ok fields -> resolve_fields ctx src' o fields path
             | Error e -> Io.error (`Argument_error e))
       | Enum e ->
-          coerce_or_null src (fun src' ->
+         (match src with
+          | None -> Io.ok (`Null, [])
+          | Some src' ->
             match List.find (fun enum_value -> src' = enum_value.value) e.values with
             | Some enum_value -> Io.ok (`String enum_value.name, [])
             | None -> Io.ok (`Null, [])
           )
       | Abstract _ ->
-          coerce_or_null src (fun (AbstractValue (typ', src')) ->
+          (match src with
+          | None -> Io.ok (`Null, [])
+          | Some (AbstractValue (typ', src')) ->
             present ctx (Some src') query_field typ' path
           )
 
-  and resolve_field : type ctx src. ctx execution_context -> src -> Graphql_parser.field -> (ctx, src) field -> path -> ((string * json) * error list, [> resolve_error]) result Io.t =
+  and resolve_field : type src. execution_context -> src -> Graphql_parser.field -> (src) field -> path -> ((string * json) * error list, [> resolve_error]) result Io.t =
     fun ctx src query_field (Field field) path ->
       let open Io.Infix in
       let name = alias_or_name query_field in
@@ -1439,7 +1538,7 @@ end
       | Error err ->
           Io.error (`Argument_error err)
 
-  and resolve_fields : type ctx src. ctx execution_context -> ?execution_order:execution_order -> src -> (ctx, src) obj -> Graphql_parser.field list -> path -> (json * error list, [> resolve_error]) result Io.t =
+  and resolve_fields : type src. execution_context -> ?execution_order:execution_order -> src -> (src) obj -> Graphql_parser.field list -> path -> (json * error list, [> resolve_error]) result Io.t =
     fun ctx ?execution_order:(execution_order=Parallel) src obj fields path ->
       map_fields_with_order execution_order (fun (query_field : Graphql_parser.field) ->
         let name = alias_or_name query_field in
@@ -1465,6 +1564,118 @@ end
           "data", data;
         ]
 
+  let rec present_fast : type src. execution_context -> src -> Graphql_parser.field -> (src) typ -> path -> (json * error list, [> resolve_error]) result =
+    fun ctx src query_field typ path ->
+      match typ with
+      | Scalar s -> (match src with
+                    | None -> Ok (`Null, [])
+                    | Some src' -> Ok (s.coerce src', []))
+      | List t ->
+          (match src with
+           | None -> Ok (`Null, [])
+           | Some src' ->
+              let x = (List.mapi (fun i x -> present_fast ctx x query_field t ((`Int i)::path)) src')
+                      |> List.Result.join in
+              match x with
+              | Error e -> Error e
+              | Ok xs -> Ok (`List (List.map fst xs), List.map snd xs |> List.concat)
+          )
+      | NonNullable t -> present_fast ctx (Some src) query_field t path
+      | Object o ->
+         (match src with
+          | None -> Ok (`Null, [])
+          | Some src' ->
+            match collect_fields ctx o query_field.selection_set with
+            | Ok fields -> resolve_fields_fast ctx src' o fields path
+            | Error e -> Error (`Argument_error e))
+      | Enum e ->
+         (match src with
+          | None -> Ok (`Null, [])
+          | Some src' ->
+            match List.find (fun enum_value -> src' = enum_value.value) e.values with
+            | Some enum_value -> Ok (`String enum_value.name, [])
+            | None -> Ok (`Null, [])
+          )
+      | Abstract _ ->
+          (match src with
+          | None -> Ok (`Null, [])
+          | Some (AbstractValue (typ', src')) ->
+            present_fast ctx (Some src') query_field typ' path
+          )
+
+  and resolve_field_fast : type src. execution_context -> src -> Graphql_parser.field -> (src) fast_field -> path -> ((string * json) * error list, [> resolve_error]) result =
+    fun ctx src query_field (FastField field) path ->
+      let name = alias_or_name query_field in
+      let path' = (`String name)::path in
+      let resolve_info = {
+        ctx = ctx.ctx;
+        field = query_field;
+        fragments = ctx.fragments;
+        variables = ctx.variables;
+        operation = ctx.operation;
+      } in
+      let ctx_ref = ref ctx.ctx in
+      let resolver = match field.resolve with
+      | `Resolve_with_set_child_context resolve ->
+         let set_child_context = (fun f ->
+           let new_ctx = (f !ctx_ref) in
+           ctx_ref := new_ctx;
+           new_ctx) in
+         resolve set_child_context resolve_info src
+      | `Resolve resolve ->
+         resolve resolve_info src
+      in
+      match Arg.eval_arglist ctx.variables ~field_name:field.name field.args query_field.arguments resolver with
+      | Ok unlifted_value ->
+          (* let lifted_value = *)
+          (*   field.lift unlifted_value *)
+          (*   |> Io.Result.map_error ~f:(fun (err: err) -> `Resolve_error (err, path')) >>=? fun resolved -> *)
+          (*   present { ctx with ctx = !ctx_ref } resolved query_field field.typ path' *)
+          (* in *)
+          (* lifted_value >>| (function *)
+          let lifted_value = field.lift unlifted_value in
+          let lifted_value = match lifted_value with
+          | Error err -> Error (`Resolve_error (err, path'))
+          | Ok resolved ->
+            present_fast { ctx with ctx = !ctx_ref } resolved query_field field.typ path'
+          in
+          let res = match lifted_value with
+          | Ok (value, errors) ->
+              Ok ((name, value), errors)
+          | Error (`Argument_error _)
+          | Error (`Validation_error _) as error ->
+              error
+          | Error (`Resolve_error err) as error ->
+              match field.typ with
+              | NonNullable _ ->
+                  error
+              | _ ->
+                 Ok ((name, `Null), [err]) in
+          res
+      | Error err ->
+          Error (`Argument_error err)
+
+  and resolve_fields_fast : type src. execution_context -> ?execution_order:execution_order -> src -> (src) obj -> Graphql_parser.field list -> path -> (json * error list, [> resolve_error]) result =
+    fun ctx ?execution_order:(execution_order=Parallel) src obj fields path ->
+
+    let res = List.map (fun (query_field : Graphql_parser.field) ->
+        let name = alias_or_name query_field in
+        if query_field.name = "__typename" then
+          Ok ((name, `String obj.name), [])
+        else
+          match fast_field_from_object obj query_field.name with
+          | Some field ->
+              resolve_field_fast ctx src query_field field path
+          | None ->
+              let err = Printf.sprintf "Field '%s' is not defined on type '%s'" query_field.name obj.name in
+              Error (`Validation_error err)
+      ) fields
+      |> List.Result.join in
+    match res with
+    | Error e -> Error e
+    | Ok xs -> Ok (`Assoc (List.map fst xs), List.map snd xs |> List.concat)
+
+
   let to_response = function
     | Ok _ as res -> res
     | Error `No_operation_found ->
@@ -1486,7 +1697,7 @@ end
        let `Assoc errors = error_response ~path ~extensions:(Err.extensions_of_error err) (Err.message_of_error err) in
         Error (`Assoc (("data", `Null)::errors))
 
-  let subscribe : type ctx. ctx execution_context -> ctx subscription_field -> Graphql_parser.field -> (json response Io.Stream.t, [> resolve_error]) result Io.t
+  let subscribe : execution_context -> subscription_field -> Graphql_parser.field -> (json response Io.Stream.t, [> resolve_error]) result Io.t
   =
     fun ctx (SubscriptionField subs_field) field ->
       let open Io.Infix in
@@ -1515,7 +1726,7 @@ end
           |> Io.Result.map_error ~f:(fun (err: err) -> `Resolve_error (err, path))
       | Error err -> Io.error (`Argument_error err)
 
-  let execute_operation : 'ctx schema -> 'ctx execution_context -> Graphql_parser.operation -> ([ `Response of json | `Stream of json response Io.Stream.t], [> execute_error]) result Io.t =
+  let execute_operation : schema -> execution_context -> Graphql_parser.operation -> ([ `Response of json | `Stream of json response Io.Stream.t], [> execute_error]) result Io.t =
     fun schema ctx operation ->
       let open Io.Infix in
       match operation.optype with
@@ -1523,7 +1734,8 @@ end
           let query  = schema.query in
           Io.return (collect_fields ctx query operation.selection_set)
           |> Io.Result.map_error ~f:(fun e -> `Argument_error e) >>=? fun fields ->
-          (resolve_fields ctx () query fields [] : (json * error list, resolve_error) result Io.t :> (json * error list, [> execute_error]) result Io.t)
+          (* (resolve_fields ctx () query fields [] : (json * error list, resolve_error) result Io.t :> (json * error list, [> execute_error]) result Io.t) *)
+          (Io.return (resolve_fields_fast ctx () query fields []) : (json * error list, resolve_error) result Io.t :> (json * error list, [> execute_error]) result Io.t)
           |> Io.Result.map ~f:(fun data_errs -> `Response (data_to_json data_errs))
       | Graphql_parser.Mutation ->
           begin match schema.mutation with
@@ -1609,6 +1821,8 @@ end
           Ok (List.find_exn (fun op -> op.Graphql_parser.name = Some name) ops)
         with Not_found ->
           Error `Operation_not_found
+  let prepare_schema schema =
+    Introspection.add_schema_field schema
 
   let execute schema ctx ?variables:(variables=[]) ?operation_name doc =
     let open Io.Infix in
@@ -1616,10 +1830,10 @@ end
       Io.return (collect_and_validate_fragments doc) >>=? fun fragments ->
       let variables = List.fold_left (fun memo (name, value) -> StringMap.add name value memo) StringMap.empty variables in
 
-      let schema' = Introspection.add_schema_field schema in
+      (* let schema' = Introspection.add_schema_field schema in *)
       Io.return (select_operation ?operation_name doc) >>=? fun op ->
         let execution_ctx = { fragments; ctx; variables; operation = op } in
-        execute_operation schema' execution_ctx op
+        execute_operation schema (* schema' *) execution_ctx op
     in
     execute' schema ctx doc >>| to_response
 end

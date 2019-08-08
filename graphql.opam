@@ -19,6 +19,7 @@ depends: [
   "rresult"
   "seq"
   "alcotest" {with-test}
+  "landmarks"
 ]
 
 synopsis: "Build GraphQL schemas and execute queries against them"

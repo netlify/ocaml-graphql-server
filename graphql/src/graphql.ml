@@ -5,6 +5,10 @@ module Err = struct
   let extensions_of_error _t = []
 end
 
+module Context = struct
+  type t = {dummy: string}
+end
+
 module Schema = Graphql_schema.Make (struct
   type +'a t = 'a
 
@@ -18,4 +22,4 @@ module Schema = Graphql_schema.Make (struct
     let iter t f = Seq.iter f t
     let close _t = ()
   end
-end) (Err)
+end) (Err) (Context)

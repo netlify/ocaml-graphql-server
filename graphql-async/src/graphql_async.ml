@@ -5,6 +5,9 @@ module Err = struct
   let extensions_of_error _t = []
 end
 
+module Context = struct
+  type t = {dummy: string}
+end
 
 module Schema = Graphql_schema.Make (struct
   include Async_kernel.Deferred
@@ -21,4 +24,4 @@ module Schema = Graphql_schema.Make (struct
 
     let close = Async_kernel.Pipe.close_read
   end
-end) (Err)
+end) (Err) (Context)
