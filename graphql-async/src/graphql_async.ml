@@ -2,23 +2,27 @@ module Err = struct
   type t = string
 
   let message_of_error t = t
+
   let extensions_of_error _t = []
 end
 
+module Schema =
+  Graphql_schema.Make
+    (struct
+      include Async_kernel.Deferred
 
-module Schema = Graphql_schema.Make (struct
-  include Async_kernel.Deferred
+      let bind x f = bind x ~f
 
-  let bind x f = bind x ~f
+      module Stream = struct
+        type 'a t = 'a Async_kernel.Pipe.Reader.t
 
-  module Stream = struct
-    type 'a t = 'a Async_kernel.Pipe.Reader.t
+        let map t f =
+          Async_kernel.Pipe.map' t ~f:(fun q ->
+              Async_kernel.Deferred.Queue.map q ~f)
 
-    let map t f = Async_kernel.Pipe.map' t ~f:(fun q ->
-      Async_kernel.Deferred.Queue.map q ~f)
+        let iter t f = Async_kernel.Pipe.iter t ~f
 
-    let iter t f = Async_kernel.Pipe.iter t ~f
-
-    let close = Async_kernel.Pipe.close_read
-  end
-end) (Err)
+        let close = Async_kernel.Pipe.close_read
+      end
+    end)
+    (Err)

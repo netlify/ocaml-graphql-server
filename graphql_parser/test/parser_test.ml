@@ -1,20 +1,20 @@
-let graphql_query = Alcotest.testable Fmt.string (fun a b ->
-  let graphql_ignored = Str.regexp "[ ,\t\r\n]" in
-  let strip = Str.global_replace graphql_ignored "" in
-  (strip a) = (strip b)
-)
+let graphql_query =
+  Alcotest.testable Fmt.string (fun a b ->
+      let graphql_ignored = Str.regexp "[ ,\t\r\n]" in
+      let strip = Str.global_replace graphql_ignored "" in
+      strip a = strip b)
 
 let test_query query =
   match Graphql_parser.parse query with
   | Ok doc ->
       let query' = Fmt.to_to_string Graphql_parser.pp_document doc in
       Alcotest.check graphql_query "Parse result" query query'
-  | Error err ->
-      Alcotest.failf "Failed to parse %s: %s" query err
+  | Error err -> Alcotest.failf "Failed to parse %s: %s" query err
 
 let test_introspection_query () =
   test_query
-    "query IntrospectionQuery {
+    {|
+    query IntrospectionQuery {
       __schema {
         queryType { name }
         mutationType { name }
@@ -90,11 +90,13 @@ let test_introspection_query () =
           }
         }
       }
-    }"
+    }
+  |}
 
 let test_kitchen_sink () =
   test_query
-    "query queryName($foo: ComplexType, $site: Site = MOBILE) {
+    {|
+    query queryName($foo: ComplexType, $site: Site = MOBILE) {
       whoever123is: node(id: [123, 456]) {
         id ,
         ... on User @defer {
@@ -137,17 +139,19 @@ let test_kitchen_sink () =
     }
 
     fragment frag on Friend {
-      foo(size: $size, bar: $b, obj: {key: \"value\"})
+      foo(size: $size, bar: $b, obj: {key: "value"})
     }
 
     {
       unnamed(truthy: true, falsey: false, nullish: null),
       query
-    }"
+    }
+  |}
 
 let test_variables () =
   test_query
-    "query Named($a: String, $b: Float) {
+    {|
+    query Named($a: String, $b: Float) {
       x
     }
 
@@ -157,22 +161,26 @@ let test_variables () =
 
     query NonNull($a: ID!, $b: [Foo]!, $c: [Foo!], $d: [Foo!]!) {
       x
-    }"
+    }
+  |}
 
 let test_default_values () =
   test_query
-    "query DefaultValues(
+    {|
+    query DefaultValues(
         $a: Int = 1,
         $b: [String] = [\"a\"],
         $c: Obj = {x: {y: true}, z: RED},
         $d: [Obj]! = [{x: {y: null}, z: BLUE}]
       ) {
       x
-    }"
+    }
+  |}
 
 let test_keywords () =
   test_query
-    "query Keywords(
+    {|
+    query Keywords(
       $fragment: Int,
       $false: Int,
       $mutation: Int,
@@ -218,11 +226,13 @@ let test_keywords () =
 
     fragment true on Foo {
       a
-    }"
+    }
+  |}
 
 let test_escaped_string () =
-  test_query {|
-    {	
+  test_query
+    {|
+    {
       escaped_quote(x: "\"")
       backslash(x: "\\")
       slash(x: "/")
@@ -235,11 +245,12 @@ let test_escaped_string () =
     }
   |}
 
-let suite = [
-  "introspection", `Quick, test_introspection_query;
-  "kitchen sink", `Quick, test_kitchen_sink;
-  "default values", `Quick, test_default_values;
-  "keywords", `Quick, test_keywords;
-  "variables", `Quick, test_variables;
-  "escaped string", `Quick, test_escaped_string;
-]
+let suite =
+  [
+    ("introspection", `Quick, test_introspection_query);
+    ("kitchen sink", `Quick, test_kitchen_sink);
+    ("default values", `Quick, test_default_values);
+    ("keywords", `Quick, test_keywords);
+    ("variables", `Quick, test_variables);
+    ("escaped string", `Quick, test_escaped_string);
+  ]
