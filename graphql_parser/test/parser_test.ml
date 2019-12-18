@@ -169,7 +169,7 @@ let test_default_values () =
     {|
     query DefaultValues(
         $a: Int = 1,
-        $b: [String] = [\"a\"],
+        $b: [String] = ["a"],
         $c: Obj = {x: {y: true}, z: RED},
         $d: [Obj]! = [{x: {y: null}, z: BLUE}]
       ) {

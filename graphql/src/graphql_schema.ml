@@ -46,19 +46,18 @@ module type IO = sig
   with type 'a io := 'a t
 end
 
-module type Err = sig
+(* Field_error *)
+module type Field_error = sig
   type t
 
-  val message_of_error : t -> string
+  val message_of_field_error : t -> string
 
-  val extensions_of_error :
-    t -> ((string * Yojson.Basic.json)[@warning "-3"]) list
+  val extensions_of_field_error :
+    t -> ((string * Yojson.Basic.json)[@warning "-3"]) list option
 end
 
 (* Schema *)
-module Make (Io : IO) (Err : Err) = struct
-  type err = Err.t
-
+module Make (Io : IO) (Field_error : Field_error) = struct
   module Io = struct
     include Io
 
@@ -108,6 +107,8 @@ module Make (Io : IO) (Err : Err) = struct
   end
 
   module StringSet = Set.Make (String)
+
+  type field_error = Field_error.t
 
   type variable_map = Graphql_parser.const_value StringMap.t
 
@@ -444,7 +445,7 @@ module Make (Io : IO) (Err : Err) = struct
           [ `Resolve of 'ctx resolve_info -> 'src -> 'args
           | `Resolve_with_set_child_context of
             (('ctx -> 'ctx) -> 'ctx) -> 'ctx resolve_info -> 'src -> 'args ];
-        lift : 'a -> ('out, err) result Io.t;
+        lift : 'a -> ('out, field_error) result Io.t;
       }
         -> ('ctx, 'src) field
 
@@ -480,7 +481,8 @@ module Make (Io : IO) (Err : Err) = struct
         doc : string option;
         deprecated : deprecated;
         typ : ('ctx, 'out) typ;
-        args : (('out Io.Stream.t, err) result Io.t, 'args) Arg.arg_list;
+        args :
+          (('out Io.Stream.t, field_error) result Io.t, 'args) Arg.arg_list;
         resolve : 'ctx resolve_info -> 'args;
       }
         -> 'ctx subscription_field
@@ -784,6 +786,20 @@ module Make (Io : IO) (Err : Err) = struct
             | DefaultArg a -> arg_types memo a.typ
           in
           arg_list_types memo' args
+
+    let types_of_schema s =
+      let types, _ =
+        List.fold_left
+          (fun memo op ->
+            match op with None -> memo | Some op -> types ~memo (Object op))
+          ([], StringSet.empty)
+          [
+            Some s.query;
+            s.mutation;
+            Option.map s.subscription ~f:obj_of_subscription_obj;
+          ]
+      in
+      types
 
     let rec args_to_list :
         type a b. ?memo:any_arg list -> (a, b) Arg.arg_list -> any_arg list =
@@ -1415,7 +1431,7 @@ module Make (Io : IO) (Err : Err) = struct
               ];
         }
 
-    let __schema : 'ctx. ('ctx, 'ctx schema option) typ =
+    let __schema : 'ctx. ('ctx, ('ctx schema * any_typ list) option) typ =
       Object
         {
           name = "__Schema";
@@ -1432,24 +1448,7 @@ module Make (Io : IO) (Err : Err) = struct
                     typ = NonNullable (List (NonNullable __type));
                     args = Arg.[];
                     lift = Io.ok;
-                    resolve =
-                      `Resolve
-                        (fun _ s ->
-                          let types, _ =
-                            List.fold_left
-                              (fun memo op ->
-                                match op with
-                                | None -> memo
-                                | Some op -> types ~memo (Object op))
-                              ([], StringSet.empty)
-                              [
-                                Some s.query;
-                                s.mutation;
-                                Option.map s.subscription
-                                  ~f:obj_of_subscription_obj;
-                              ]
-                          in
-                          types);
+                    resolve = `Resolve (fun _ (_schema, types) -> types);
                   };
                 Field
                   {
@@ -1459,7 +1458,7 @@ module Make (Io : IO) (Err : Err) = struct
                     typ = NonNullable __type;
                     args = Arg.[];
                     lift = Io.ok;
-                    resolve = `Resolve (fun _ s -> AnyTyp (Object s.query));
+                    resolve = `Resolve (fun _ (schema, _types) -> AnyTyp (Object schema.query));
                   };
                 Field
                   {
@@ -1471,8 +1470,8 @@ module Make (Io : IO) (Err : Err) = struct
                     lift = Io.ok;
                     resolve =
                       `Resolve
-                        (fun _ s ->
-                          Option.map s.mutation ~f:(fun mut ->
+                        (fun _ (schema, _types) ->
+                          Option.map schema.mutation ~f:(fun mut ->
                               AnyTyp (Object mut)));
                   };
                 Field
@@ -1485,8 +1484,8 @@ module Make (Io : IO) (Err : Err) = struct
                     lift = Io.ok;
                     resolve =
                       `Resolve
-                        (fun _ s ->
-                          Option.map s.subscription ~f:(fun subs ->
+                        (fun _ (schema, _types) ->
+                          Option.map schema.subscription ~f:(fun subs ->
                               AnyTyp (Object (obj_of_subscription_obj subs))));
                   };
                 Field
@@ -1499,20 +1498,11 @@ module Make (Io : IO) (Err : Err) = struct
                     lift = Io.ok;
                     resolve = `Resolve (fun _ _ -> []);
                   };
-                Field
-                  {
-                    name = "subscriptionType";
-                    doc = None;
-                    deprecated = NotDeprecated;
-                    typ = __type;
-                    args = Arg.[];
-                    lift = Io.ok;
-                    resolve = `Resolve (fun _ _ -> None);
-                  };
               ];
         }
 
-    let add_schema_field s =
+    let add_built_in_fields schema =
+      let types = types_of_schema schema in
       let schema_field =
         Field
           {
@@ -1522,11 +1512,41 @@ module Make (Io : IO) (Err : Err) = struct
             typ = NonNullable __schema;
             args = Arg.[];
             lift = Io.ok;
-            resolve = `Resolve (fun _ _ -> s);
+            resolve = `Resolve (fun _ _ -> (schema, types));
           }
       in
-      let fields = lazy (schema_field :: Lazy.force s.query.fields) in
-      { s with query = { s.query with fields } }
+      let type_field =
+        Field
+          {
+            name = "__type";
+            doc = None;
+            deprecated = NotDeprecated;
+            typ = __type;
+            args = Arg.[ arg "name" ~typ:(non_null string) ];
+            lift = Io.ok;
+            resolve =
+              `Resolve (fun _ _ name ->
+                List.find
+                  (fun typ ->
+                    match typ with
+                    | AnyTyp (Object o) -> o.name = name
+                    | AnyTyp (Scalar s) -> s.name = name
+                    | AnyTyp (Enum e) -> e.name = name
+                    | AnyTyp (Abstract a) -> a.name = name
+                    | AnyTyp (List _) -> false
+                    | AnyTyp (NonNullable _) -> false
+                    | AnyArgTyp (Arg.Object o) -> o.name = name
+                    | AnyArgTyp (Arg.Scalar s) -> s.name = name
+                    | AnyArgTyp (Arg.Enum e) -> e.name = name
+                    | AnyArgTyp (Arg.List _) -> false
+                    | AnyArgTyp (Arg.NonNullable _) -> false)
+                  types);
+          }
+      in
+      let fields =
+        lazy (schema_field :: type_field :: Lazy.force schema.query.fields)
+      in
+      { schema with query = { schema.query with fields } }
   end
 
   (* Execution *)
@@ -1543,7 +1563,7 @@ module Make (Io : IO) (Err : Err) = struct
 
   type path = [ `String of string | `Int of int ] list
 
-  type error = err * path
+  type error = field_error * path
 
   type resolve_error =
     [ `Resolve_error of error
@@ -1591,28 +1611,20 @@ module Make (Io : IO) (Err : Err) = struct
    fun field ->
     match field.alias with Some alias -> alias | None -> field.name
 
-  let merge_selections (fields : Graphql_parser.field list) =
-    let m =
-      List.fold_left
-        (fun m (field : Graphql_parser.field) ->
-          StringMap.update (alias_or_name field)
-            (function
-              | None -> Some field.selection_set
-              | Some x -> Some (List.append x field.selection_set))
-            m)
-        StringMap.empty fields
-    in
-    let _, res =
-      List.fold_right
-        (fun (field : Graphql_parser.field) (m, res) ->
-          let name = alias_or_name field in
-          match StringMap.find name m with
-          | None -> (m, res)
-          | Some selection_set ->
-              (StringMap.remove name m, { field with selection_set } :: res))
-        fields (m, [])
-    in
-    res
+  let rec merge_selections ?(memo = []) = function
+    | [] -> List.rev memo
+    | field :: fields ->
+        let id = alias_or_name field in
+        let matching, rest =
+          List.partition (fun field' -> id = alias_or_name field') fields
+        in
+        let selection_sets =
+          List.map
+            (fun (field : Graphql_parser.field) -> field.selection_set)
+            (field :: matching)
+        in
+        let selection_set = List.concat selection_sets in
+        merge_selections ~memo:({ field with selection_set } :: memo) rest
 
   let rec collect_fields :
       'ctx execution_context ->
@@ -1680,15 +1692,15 @@ module Make (Io : IO) (Err : Err) = struct
       | Some path -> [ ("path", `List (List.rev path :> json list)) ]
       | None -> []
     in
-    let extensionProps =
+    let extension_props =
       match extensions with
       | None | Some [] -> []
       | Some extensions -> [ ("extensions", `Assoc extensions) ]
     in
-    ( `Assoc (("message", `String msg) :: List.concat [ props; extensionProps ])
+    ( `Assoc (("message", `String msg) :: List.append props extension_props)
       : json )
 
-  let error_response ?path ?data ?extensions msg =
+  let error_response ?data ?path ?extensions msg =
     let errors = ("errors", `List [ error_to_json ?path ?extensions msg ]) in
     let data =
       match data with None -> [] | Some data -> [ ("data", data) ]
@@ -1771,8 +1783,7 @@ module Make (Io : IO) (Err : Err) = struct
     | Ok unlifted_value -> (
         let lifted_value =
           field.lift unlifted_value
-          |> Io.Result.map_error ~f:(fun (err : err) ->
-                 `Resolve_error (err, path'))
+          |> Io.Result.map_error ~f:(fun err -> `Resolve_error (err, path'))
           >>=? fun resolved ->
           present
             { ctx with ctx = !ctx_ref }
@@ -1819,13 +1830,15 @@ module Make (Io : IO) (Err : Err) = struct
 
   let data_to_json = function
     | data, [] -> `Assoc [ ("data", data) ]
-    | data, (errors : error list) ->
+    | data, errors ->
         let errors =
           List.map
-            (fun ((err : err), path) ->
-              error_to_json ~path
-                ~extensions:(Err.extensions_of_error err)
-                (Err.message_of_error err))
+            (fun (field_error, path) ->
+              let extensions =
+                Field_error.extensions_of_field_error field_error
+              in
+              let msg = Field_error.message_of_field_error field_error in
+              error_to_json ~path ?extensions msg)
             errors
         in
         `Assoc [ ("errors", `List errors); ("data", data) ]
@@ -1842,16 +1855,11 @@ module Make (Io : IO) (Err : Err) = struct
     | Error `Mutations_not_configured ->
         Error (error_response "Mutations not configured")
     | Error (`Validation_error msg) -> Error (error_response msg)
-    | Error (`Argument_error msg) ->
-        let (`Assoc errors) = error_response msg in
-        Error (`Assoc (("data", `Null) :: errors))
-    | Error (`Resolve_error (err, path)) ->
-        let (`Assoc errors) =
-          error_response ~path
-            ~extensions:(Err.extensions_of_error err)
-            (Err.message_of_error err)
-        in
-        Error (`Assoc (("data", `Null) :: errors))
+    | Error (`Argument_error msg) -> Error (error_response ~data:`Null msg)
+    | Error (`Resolve_error (field_error, path)) ->
+        let extensions = Field_error.extensions_of_field_error field_error in
+        let msg = Field_error.message_of_field_error field_error in
+        Error (error_response ~data:`Null ~path ?extensions msg)
 
   let subscribe :
       type ctx.
@@ -1885,8 +1893,7 @@ module Make (Io : IO) (Err : Err) = struct
                    |> Io.Result.map ~f:(fun (data, errors) ->
                           data_to_json (`Assoc [ (name, data) ], errors))
                    >>| to_response))
-        |> Io.Result.map_error ~f:(fun (err : err) ->
-               `Resolve_error (err, path))
+        |> Io.Result.map_error ~f:(fun err -> `Resolve_error (err, path))
     | Error err -> Io.error (`Argument_error err)
 
   let execute_operation :
@@ -1934,19 +1941,30 @@ module Make (Io : IO) (Err : Err) = struct
             >>=? fun fields ->
             match fields with
             | [ field ] -> (
-                match field_from_subscription_object subs field.name with
-                | Some subscription_field ->
-                    ( subscribe ctx subscription_field field
-                      : ((json, json) result Io.Stream.t, resolve_error) result
-                        Io.t
-                      :> ( (json, json) result Io.Stream.t,
-                           [> execute_error ] )
-                         result
-                         Io.t )
-                    |> Io.Result.map ~f:(fun stream -> `Stream stream)
-                | None ->
-                    Io.ok (`Response (`Assoc [ (alias_or_name field, `Null) ]))
-                )
+                if field.name = "__typename" then
+                  Io.ok
+                    (`Response
+                      (data_to_json
+                         (`Assoc [ (field.name, `String subs.name) ], [])))
+                else
+                  match field_from_subscription_object subs field.name with
+                  | Some subscription_field ->
+                      ( subscribe ctx subscription_field field
+                        : ( (json, json) result Io.Stream.t,
+                            resolve_error )
+                          result
+                          Io.t
+                        :> ( (json, json) result Io.Stream.t,
+                             [> execute_error ] )
+                           result
+                           Io.t )
+                      |> Io.Result.map ~f:(fun stream -> `Stream stream)
+                  | None ->
+                      let err =
+                        Printf.sprintf "Field '%s' is not defined on type '%s'"
+                          field.name subs.name
+                      in
+                      Io.error (`Validation_error err) )
             (* see http://facebook.github.io/graphql/June2018/#sec-Response-root-field *)
             | _ ->
                 Io.error
@@ -2022,13 +2040,21 @@ module Make (Io : IO) (Err : Err) = struct
     let open Io.Infix in
     let execute' schema ctx doc =
       Io.return (collect_and_validate_fragments doc) >>=? fun fragments ->
+      let schema' = Introspection.add_built_in_fields schema in
+      Io.return (select_operation ?operation_name doc) >>=? fun op ->
+      let default_variables =
+        List.fold_left
+          (fun memo { Graphql_parser.name; default_value; _ } ->
+            match default_value with
+            | None -> memo
+            | Some value -> StringMap.add name value memo)
+          StringMap.empty op.variable_definitions
+      in
       let variables =
         List.fold_left
           (fun memo (name, value) -> StringMap.add name value memo)
-          StringMap.empty variables
+          default_variables variables
       in
-      let schema' = Introspection.add_schema_field schema in
-      Io.return (select_operation ?operation_name doc) >>=? fun op ->
       let execution_ctx = { fragments; ctx; variables; operation = op } in
       execute_operation schema' execution_ctx op
     in

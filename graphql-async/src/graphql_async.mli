@@ -4,5 +4,5 @@ module Schema : sig
     Graphql_intf.Schema
       with type 'a Io.t = 'a Async_kernel.Deferred.t
        and type 'a Io.Stream.t = 'a Async_kernel.Pipe.Reader.t
-       and type err = string
+       and type field_error = string
 end

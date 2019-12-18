@@ -180,6 +180,51 @@ let suite =
                       ];
                   ] );
             ]) );
+    ( "fragments combine nested fields",
+      `Quick,
+      fun () ->
+        let query =
+          {|
+      query Q {
+        users {
+          role
+        }
+        ...F1
+      }
+      fragment F1 on query {
+        users {
+          name
+        }
+      }
+    |}
+        in
+        test_query query
+          (`Assoc
+            [
+              ( "data",
+                `Assoc
+                  [
+                    ( "users",
+                      `List
+                        [
+                          `Assoc
+                            [
+                              ("role", `String "admin");
+                              ("name", `String "Alice");
+                            ];
+                          `Assoc
+                            [
+                              ("role", `String "user");
+                              ("name", `String "Bob");
+                            ];
+                          `Assoc
+                            [
+                              ("role", `String "user");
+                              ("name", `String "Charlie");
+                            ];
+                        ] );
+                  ] );
+            ]) );
     ( "introspection query should be accepted",
       `Quick,
       fun () ->
@@ -357,5 +402,24 @@ let suite =
                           `Assoc [ ("id", `Int 2); ("name", `String "Bob") ] );
                       ] );
                 ];
+            ]) );
+    ( "subscription field that doesn't exist",
+      `Quick,
+      fun () ->
+        let query = "subscription { dont_exist { id name } }" in
+        test_query query
+          (`Assoc
+            [
+              ( "errors",
+                `List
+                  [
+                    `Assoc
+                      [
+                        ( "message",
+                          `String
+                            "Field 'dont_exist' is not defined on type \
+                             'subscription'" );
+                      ];
+                  ] );
             ]) );
   ]

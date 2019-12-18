@@ -4,7 +4,7 @@ let test_query schema query = Test_common.test_query schema () query
 
 let suite =
   [
-    ( "not deprecated",
+    ( "__schema: not deprecated",
       `Quick,
       fun () ->
         let schema =
@@ -45,7 +45,7 @@ let suite =
                         ] );
                   ] );
             ]) );
-    ( "default deprecation",
+    ( "__schema: default deprecation",
       `Quick,
       fun () ->
         let schema =
@@ -86,7 +86,7 @@ let suite =
                         ] );
                   ] );
             ]) );
-    ( "deprecated-without-reason",
+    ( "__schema: deprecated-without-reason",
       `Quick,
       fun () ->
         let schema =
@@ -128,7 +128,7 @@ let suite =
                         ] );
                   ] );
             ]) );
-    ( "deprecated with reason",
+    ( "__schema: deprecated with reason",
       `Quick,
       fun () ->
         let schema =
@@ -172,7 +172,7 @@ let suite =
                         ] );
                   ] );
             ]) );
-    ( "deduplicates argument types",
+    ( "__schema: deduplicates argument types",
       `Quick,
       fun () ->
         let schema =
@@ -208,4 +208,62 @@ let suite =
                         ] );
                   ] );
             ]) );
+    ( "__type",
+      `Quick,
+      fun () ->
+        let query =
+          {|
+      {
+        role_type: __type(name: "role") {
+          name
+        }
+        user_type: __type(name: "user") {
+          name
+        }
+      }
+    |}
+        in
+        test_query Test_schema.schema query
+          (`Assoc
+            [
+              ( "data",
+                `Assoc
+                  [
+                    ("role_type", `Assoc [ ("name", `String "role") ]);
+                    ("user_type", `Assoc [ ("name", `String "user") ]);
+                  ] );
+            ]) );
+    ( "__typename",
+      `Quick,
+      fun () ->
+        let schema =
+          Graphql.Schema.(
+            schema ~query_name:"MyQuery" [] ~mutations:[]
+              ~mutation_name:"MyMutation" ~subscriptions:[]
+              ~subscription_name:"MySubscription")
+        in
+        test_query schema
+          {|
+        query {
+          __typename
+        }
+      |}
+          (`Assoc [ ("data", `Assoc [ ("__typename", `String "MyQuery") ]) ]);
+        test_query schema
+          {|
+        mutation {
+          __typename
+        }
+      |}
+          (`Assoc
+            [ ("data", `Assoc [ ("__typename", `String "MyMutation") ]) ]);
+        test_query schema
+          {|
+        subscription {
+          __typename
+        }
+      |}
+          (`Assoc
+            [ ("data", `Assoc [ ("__typename", `String "MySubscription") ]) ])
+    );
   ]

@@ -1,11 +1,3 @@
-module Err = struct
-  type t = string
-
-  let message_of_error t = t
-
-  let extensions_of_error _t = []
-end
-
 module Schema =
   Graphql_schema.Make
     (struct
@@ -25,4 +17,10 @@ module Schema =
         let close = Async_kernel.Pipe.close_read
       end
     end)
-    (Err)
+    (struct
+      type t = string
+
+      let message_of_field_error t = t
+
+      let extensions_of_field_error _t = None
+    end)

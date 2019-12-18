@@ -8,7 +8,7 @@ This repo contains a library for creating GraphQL servers in OCaml. Note that th
 Current feature set:
 
 - [x] Type-safe schema design
-- [x] GraphQL parser in pure OCaml using [angstrom](https://github.com/inhabitedtype/angstrom) (April 2016 RFC draft)
+- [x] GraphQL parser in pure OCaml using Menhir
 - [x] Query execution
 - [x] Introspection of schemas
 - [x] Arguments for fields
@@ -282,4 +282,5 @@ Only valid schemas should pass the type checker. If a schema compiles, the follo
 The following blog posts introduces the core design concepts:
 
 - https://andreas.github.io/2017/11/29/type-safe-graphql-with-ocaml-part-1/
-- https://andreas.github.io/2018/01/05/modeling-graphql-type-modifiers-with-gadts/
+- https://andreas.github.io/2018/01/05/modeling-graphql-type-modifiers-with-gadts-part-2/
+- https://andreas.github.io/2019/05/20/graphql-resolver-arguments-as-diff-lists-part-3/

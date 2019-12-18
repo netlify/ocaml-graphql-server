@@ -8,6 +8,7 @@ let yojson =
     let equal = ( = )
   end : Alcotest.TESTABLE
     with type t = Yojson.Basic.json )
+  [@@warning "-3"]
 
 let list_of_seq seq =
   let rec loop seq =

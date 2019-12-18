@@ -72,9 +72,9 @@ type definition = Operation of operation | Fragment of fragment
 type document = definition list
 
 module Pp = struct
-  let comma = Fmt.(const string ",")
+  let comma : unit Fmt.t = Fmt.(const string ",")
 
-  let colon = Fmt.(const string ":")
+  let colon : unit Fmt.t = Fmt.(const string ":")
 
   let quote_string s =
     let open Re in

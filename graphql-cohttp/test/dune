@@ -1,0 +1,5 @@
+(tests
+ (package graphql-cohttp)
+ (names test)
+ (libraries cohttp-lwt-unix digestif.ocaml graphql-lwt graphql-cohttp
+   alcotest))
