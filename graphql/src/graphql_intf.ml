@@ -231,6 +231,15 @@ module type Schema = sig
     'src ->
     ('ctx, 'a) abstract_value
 
+  val inherit_types :
+    ('ctx, 'a) abstract_typ ->
+    ('ctx, 'b) abstract_typ ->
+    ('ctx, 'a) abstract_value -> ('ctx, 'b) abstract_value
+
+  val abstractize :
+    ('ctx, 'src option) typ ->
+    'src -> ('ctx, 'a) abstract_value
+
   (** {3 Built-in scalars} *)
 
   val int : ('ctx, int option) typ

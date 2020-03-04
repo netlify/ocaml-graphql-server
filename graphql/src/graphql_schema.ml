@@ -607,6 +607,26 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         fun src -> AbstractValue (typ, src)
     | _ -> invalid_arg "Arguments must be Interface/Union and Object"
 
+  let inherit_types :
+    'a 'b.
+    ('ctx, 'a) abstract_typ ->
+    ('ctx, 'b) abstract_typ ->
+    ('ctx, 'a) abstract_value -> ('ctx, 'b) abstract_value =
+    fun from_abstract_typ to_abstract_typ ->
+    match (from_abstract_typ, to_abstract_typ) with
+    | (Abstract from_typ), (Abstract to_typ) ->
+       to_typ.types <- List.concat [from_typ.types; to_typ.types];
+       List.iter (fun o ->
+                  match o with
+                  | AnyTyp (Object o) -> o.abstracts := to_typ :: !(o.abstracts)
+                  | _ -> invalid_arg "Types for Abstract type must be objects"
+                 ) to_typ.types;
+       fun (AbstractValue (from_typ, src)) -> (AbstractValue (from_typ, src))
+    | _ -> invalid_arg "Arguments must both be Interface/Union"
+
+  let abstractize typ src =
+    AbstractValue (typ, src)
+
   let obj_of_subscription_obj { name; doc; fields } =
     let fields =
       List.map
