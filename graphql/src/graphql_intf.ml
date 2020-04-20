@@ -261,4 +261,13 @@ module type Schema = sig
       with the given context [ctx] and [variables]. *)
 
   val introspection_result : ('ctx schema -> Yojson.Basic.json[@warning "-3"])
+
+  val execute_field :
+    ('ctx schema ->
+     'ctx ->
+     'ctx resolve_info ->
+     [ `Response of Yojson.Basic.json
+     | `Stream of Yojson.Basic.json response Io.Stream.t ]
+       response
+       Io.t[@warning "-3"])
 end

@@ -2336,4 +2336,20 @@ module Make (Io : IO) (Field_error : Field_error) = struct
       execute_operation schema execution_ctx op
     in
     execute' schema ctx doc >>| to_response
+
+  let execute_field: ('ctx schema ->
+                      'ctx ->
+                      'ctx resolve_info ->
+                      [ `Response of Yojson.Basic.json
+                      | `Stream of Yojson.Basic.json response Io.Stream.t ]
+                        response
+                        Io.t[@warning "-3"]) = fun schema ctx resolve_info ->
+    let open Io.Infix in
+    let execution_ctx = {
+      fragments = resolve_info.fragments;
+      ctx = ctx;
+      variables = resolve_info.variables;
+      operation = resolve_info.operation
+    } in
+    execute_operation schema execution_ctx resolve_info.operation >>| to_response
 end
