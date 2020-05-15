@@ -259,4 +259,6 @@ module type Schema = sig
      Io.t[@warning "-3"])
   (** [execute schema ctx variables doc] evaluates the [doc] against [schema]
       with the given context [ctx] and [variables]. *)
+
+  val introspection_result : ('ctx schema -> Yojson.Basic.json[@warning "-3"])
 end

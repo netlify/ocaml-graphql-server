@@ -519,6 +519,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
     query : ('ctx, unit) obj;
     mutation : ('ctx, unit) obj option;
     subscription : 'ctx subscription_obj option;
+    types : any_typ list;
   }
 
   (* Constructor functions *)
@@ -1434,7 +1435,10 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                     typ = NonNullable __type;
                     args = Arg.[];
                     lift = Io.ok;
-                    resolve = `Resolve (fun _ (schema, _types) -> AnyTyp (Object schema.query));
+                    resolve =
+                      `Resolve
+                        (fun _ (schema, _types) ->
+                          AnyTyp (Object schema.query));
                   };
                 Field
                   {
@@ -1477,6 +1481,264 @@ module Make (Io : IO) (Field_error : Field_error) = struct
               ];
         }
 
+    let rec kind_of_any_typ t =
+      `String
+        ( match t with
+        | AnyTyp (Object _) -> "OBJECT"
+        | AnyTyp (Abstract { kind = `Union; _ }) -> "UNION"
+        | AnyTyp (Abstract { kind = `Interface _; _ }) -> "INTERFACE"
+        | AnyTyp (List _) -> "LIST"
+        | AnyTyp (Scalar _) -> "SCALAR"
+        | AnyTyp (Enum _) -> "ENUM"
+        | AnyTyp (NonNullable _) -> "NON_NULL"
+        | AnyArgTyp (Arg.Object _) -> "INPUT_OBJECT"
+        | AnyArgTyp (Arg.List _) -> "LIST"
+        | AnyArgTyp (Arg.Scalar _) -> "SCALAR"
+        | AnyArgTyp (Arg.Enum _) -> "ENUM"
+        | AnyArgTyp (Arg.NonNullable _) -> "NON_NULL" )
+
+    and name_of_any_typ t =
+      match t with
+      | AnyTyp (Object o) -> `String o.name
+      | AnyTyp (Scalar s) -> `String s.name
+      | AnyTyp (Enum e) -> `String e.name
+      | AnyTyp (Abstract a) -> `String a.name
+      | AnyArgTyp (Arg.Object o) -> `String o.name
+      | AnyArgTyp (Arg.Scalar s) -> `String s.name
+      | AnyArgTyp (Arg.Enum e) -> `String e.name
+      | _ -> `Null
+
+    and description_of_any_typ t =
+      let doc =
+        match t with
+        | AnyTyp (Object o) -> o.doc
+        | AnyTyp (Scalar s) -> s.doc
+        | AnyTyp (Enum e) -> e.doc
+        | AnyTyp (Abstract a) -> a.doc
+        | AnyArgTyp (Arg.Object o) -> o.doc
+        | AnyArgTyp (Arg.Scalar s) -> s.doc
+        | AnyArgTyp (Arg.Enum e) -> e.doc
+        | _ -> None
+      in
+      match doc with None -> `Null | Some doc -> `String doc
+
+    and name_of_any_field f =
+      `String
+        ( match f with
+        | AnyField (Field f) -> f.name
+        | AnyArgField (Arg.Arg a) -> a.name
+        | AnyArgField (Arg.DefaultArg a) -> a.name )
+
+    and description_of_any_field f =
+      let doc =
+        match f with
+        | AnyField (Field f) -> f.doc
+        | AnyArgField (Arg.Arg a) -> a.doc
+        | AnyArgField (Arg.DefaultArg a) -> a.doc
+      in
+      match doc with None -> `Null | Some doc -> `String doc
+
+    and name_of_any_arg (AnyArg a) =
+      `String (match a with Arg.DefaultArg a -> a.name | Arg.Arg a -> a.name)
+
+    and description_of_any_arg (AnyArg a) =
+      let doc =
+        match a with Arg.DefaultArg a -> a.doc | Arg.Arg a -> a.doc
+      in
+      match doc with None -> `Null | Some doc -> `String doc
+
+    and of_type_of_any_type t =
+      match t with
+      | AnyTyp (NonNullable typ) -> type_ref_of_any_type (AnyTyp typ)
+      | AnyTyp (List typ) -> type_ref_of_any_type (AnyTyp typ)
+      | AnyArgTyp (Arg.NonNullable typ) -> type_ref_of_any_type (AnyArgTyp typ)
+      | AnyArgTyp (Arg.List typ) -> type_ref_of_any_type (AnyArgTyp typ)
+      | _ -> `Null
+
+    and type_ref_of_any_type t =
+      `Assoc
+        [
+          ("kind", kind_of_any_typ t);
+          ("name", name_of_any_typ t);
+          ("ofType", of_type_of_any_type t);
+        ]
+
+    and type_of_any_arg (AnyArg a) =
+      let t =
+        match a with
+        | Arg.DefaultArg a -> AnyArgTyp a.typ
+        | Arg.Arg a -> AnyArgTyp a.typ
+      in
+      type_ref_of_any_type t
+
+    and input_value_of_any_arg a =
+      `Assoc
+        [
+          ("name", name_of_any_arg a);
+          ("description", description_of_any_arg a);
+          ("type", type_of_any_arg a);
+          ("defaultValue", `Null);
+        ]
+
+    and args_of_any_field f =
+      match f with
+      | AnyField (Field f) ->
+          `List (List.map input_value_of_any_arg (args_to_list f.args))
+      | AnyArgField _ -> `List []
+
+    and type_ref_of_any_field f =
+      let typ =
+        match f with
+        | AnyField (Field f) -> AnyTyp f.typ
+        | AnyArgField (Arg.Arg a) -> AnyArgTyp a.typ
+        | AnyArgField (Arg.DefaultArg a) -> AnyArgTyp a.typ
+      in
+      type_ref_of_any_type typ
+
+    and is_deprecated_of_any_field f =
+      match f with
+      | AnyField (Field { deprecated = Deprecated _; _ }) -> `Bool true
+      | _ -> `Bool false
+
+    and deprecation_reason_of_any_field f =
+      match f with
+      | AnyField (Field { deprecated = Deprecated (Some reason); _ }) ->
+          `String reason
+      | _ -> `Null
+
+    and field_of_any_field f =
+      `Assoc
+        [
+          ("name", name_of_any_field f);
+          ("description", description_of_any_field f);
+          ("args", args_of_any_field f);
+          ("type", type_ref_of_any_field f);
+          ("isDeprecated", is_deprecated_of_any_field f);
+          ("deprecationReason", deprecation_reason_of_any_field f);
+        ]
+
+    and fields_of_any_typ t =
+      match t with
+      | AnyTyp (Object o) ->
+          `List
+            (List.map
+               (fun f -> field_of_any_field (AnyField f))
+               (Lazy.force o.fields))
+      | AnyTyp (Abstract { kind = `Interface fields; _ }) ->
+          `List
+            (List.map
+               (fun (AbstractField f) -> field_of_any_field (AnyField f))
+               (Lazy.force fields))
+      | AnyArgTyp (Arg.Object o) ->
+          let arg_list = args_to_list Lazy.(force o.fields) in
+          `List
+            (List.map
+               (fun (AnyArg f) -> field_of_any_field (AnyArgField f))
+               arg_list)
+      | _ -> `Null
+
+    and input_fields_of_any_typ t =
+      match t with
+      | AnyArgTyp (Arg.Object o) ->
+          `List
+            (List.map input_value_of_any_arg
+               (args_to_list Lazy.(force o.fields)))
+      | _ -> `Null
+
+    and interfaces_of_any_typ t =
+      match t with
+      | AnyTyp (Object o) ->
+          let interfaces =
+            List.filter
+              (function { kind = `Interface _; _ } -> true | _ -> false)
+              !(o.abstracts)
+          in
+          `List
+            (List.map
+               (fun i -> type_ref_of_any_type (AnyTyp (Abstract i)))
+               interfaces)
+      | _ -> `Null
+
+    and possible_types_of_any_typ t =
+      match t with
+      | AnyTyp (Abstract a) -> `List (List.map type_ref_of_any_type a.types)
+      | _ -> `Null
+
+    and enum_value_of_any_enum_value (AnyEnumValue e) =
+      `Assoc
+        [
+          ("name", `String e.name);
+          ( "description",
+            match e.doc with None -> `Null | Some d -> `String d );
+          ("isDeprecated", `Bool (e.deprecated <> NotDeprecated));
+          ( "deprecationReason",
+            match e.deprecated with
+            | Deprecated (Some reason) -> `String reason
+            | _ -> `Null );
+        ]
+
+    and enum_values_of_any_typ t =
+      match t with
+      | AnyTyp (Enum e) ->
+          `List
+            (List.map
+               (fun x -> enum_value_of_any_enum_value (AnyEnumValue x))
+               e.values)
+      | AnyArgTyp (Arg.Enum e) ->
+          `List
+            (List.map
+               (fun x -> enum_value_of_any_enum_value (AnyEnumValue x))
+               e.values)
+      | _ -> `Null
+
+    and generate_introspection_result schema =
+      `Assoc
+        [
+          ( "__schema",
+            `Assoc
+              [
+                ( "queryType",
+                  `Assoc
+                    [
+                      ("name", name_of_any_typ (AnyTyp (Object schema.query)));
+                    ] );
+                ( "mutationType",
+                  match schema.mutation with
+                  | None -> `Null
+                  | Some mut ->
+                      `Assoc
+                        [ ("name", name_of_any_typ (AnyTyp (Object mut))) ] );
+                ( "subscriptionType",
+                  match schema.subscription with
+                  | None -> `Null
+                  | Some subs ->
+                      `Assoc
+                        [
+                          ( "name",
+                            name_of_any_typ
+                              (AnyTyp (Object (obj_of_subscription_obj subs)))
+                          );
+                        ] );
+                ( "types",
+                  `List
+                    (List.map
+                       (fun t ->
+                         `Assoc
+                           [
+                             ("kind", kind_of_any_typ t);
+                             ("name", name_of_any_typ t);
+                             ("description", description_of_any_typ t);
+                             ("fields", fields_of_any_typ t);
+                             ("inputFields", input_fields_of_any_typ t);
+                             ("interfaces", interfaces_of_any_typ t);
+                             ("enumValues", enum_values_of_any_typ t);
+                             ("possibleTypes", possible_types_of_any_typ t);
+                           ])
+                       schema.types) );
+                ("directives", `List []);
+              ] );
+        ]
+
     let add_built_in_fields schema types =
       let schema_field =
         Field
@@ -1500,28 +1762,29 @@ module Make (Io : IO) (Field_error : Field_error) = struct
             args = Arg.[ arg "name" ~typ:(non_null string) ];
             lift = Io.ok;
             resolve =
-              `Resolve (fun _ _ name ->
-                List.find
-                  (fun typ ->
-                    match typ with
-                    | AnyTyp (Object o) -> o.name = name
-                    | AnyTyp (Scalar s) -> s.name = name
-                    | AnyTyp (Enum e) -> e.name = name
-                    | AnyTyp (Abstract a) -> a.name = name
-                    | AnyTyp (List _) -> false
-                    | AnyTyp (NonNullable _) -> false
-                    | AnyArgTyp (Arg.Object o) -> o.name = name
-                    | AnyArgTyp (Arg.Scalar s) -> s.name = name
-                    | AnyArgTyp (Arg.Enum e) -> e.name = name
-                    | AnyArgTyp (Arg.List _) -> false
-                    | AnyArgTyp (Arg.NonNullable _) -> false)
-                  types);
+              `Resolve
+                (fun _ _ name ->
+                  List.find
+                    (fun typ ->
+                      match typ with
+                      | AnyTyp (Object o) -> o.name = name
+                      | AnyTyp (Scalar s) -> s.name = name
+                      | AnyTyp (Enum e) -> e.name = name
+                      | AnyTyp (Abstract a) -> a.name = name
+                      | AnyTyp (List _) -> false
+                      | AnyTyp (NonNullable _) -> false
+                      | AnyArgTyp (Arg.Object o) -> o.name = name
+                      | AnyArgTyp (Arg.Scalar s) -> s.name = name
+                      | AnyArgTyp (Arg.Enum e) -> e.name = name
+                      | AnyArgTyp (Arg.List _) -> false
+                      | AnyArgTyp (Arg.NonNullable _) -> false)
+                    types);
           }
       in
       let fields =
         lazy (schema_field :: type_field :: Lazy.force schema.query.fields)
       in
-      { schema with query = { schema.query with fields } }
+      { schema with query = { schema.query with fields }; types }
   end
 
   (* Execution *)
@@ -2011,6 +2274,9 @@ module Make (Io : IO) (Field_error : Field_error) = struct
           Ok (List.find_exn (fun op -> op.Graphql_parser.name = Some name) ops)
         with Not_found -> Error `Operation_not_found )
 
+  let introspection_result schema =
+    Introspection.generate_introspection_result schema
+
   let schema :
       ?mutation_name:string ->
       ?mutations:('ctx, unit) field list ->
@@ -2042,6 +2308,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         subscription =
           Option.map subscriptions ~f:(fun fields ->
               { name = subscription_name; doc = None; fields });
+        types = [];
       }
     in
     let types = Introspection.types_of_schema schema in
