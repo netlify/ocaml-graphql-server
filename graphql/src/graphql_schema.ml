@@ -188,11 +188,11 @@ module Make (Io : IO) (Field_error : Field_error) = struct
 
     let rec string_of_const_value : Graphql_parser.const_value -> string =
       function
-      | `Null -> "null"
-      | `Int i -> string_of_int i
-      | `Float f -> string_of_float f
-      | `String s -> Printf.sprintf "\"%s\"" s
-      | `Bool b -> string_of_bool b
+      | `Null -> Yojson.Basic.to_string `Null
+      | `Int i -> Yojson.Basic.to_string (`Int i)
+      | `Float f -> Yojson.Basic.to_string (`Float f)
+      | `String s -> Yojson.Basic.to_string (`String s)
+      | `Bool b -> Yojson.Basic.to_string (`Bool b)
       | `Enum e -> e
       | `List l ->
           let values = List.map (fun i -> string_of_const_value i) l in
