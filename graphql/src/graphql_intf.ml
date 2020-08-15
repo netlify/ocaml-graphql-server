@@ -108,7 +108,11 @@ module type Schema = sig
     val arg : ?doc:string -> string -> typ:'a arg_typ -> 'a arg
 
     val arg' :
-      ?doc:string -> string -> typ:'a option arg_typ -> default:'a -> 'a arg
+      ?doc:string ->
+      string ->
+      typ:'a option arg_typ ->
+      default:Graphql_parser.const_value ->
+      'a arg
 
     val scalar :
       ?doc:string ->

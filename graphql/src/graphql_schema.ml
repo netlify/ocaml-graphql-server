@@ -167,24 +167,13 @@ module Make (Io : IO) (Field_error : Field_error) = struct
           doc : string option;
           typ : 'a option arg_typ;
           default : 'a;
+          default_value : Graphql_parser.const_value;
         }
           -> 'a arg
 
     and (_, _) arg_list =
       | [] : ('a, 'a) arg_list
       | ( :: ) : 'a arg * ('b, 'c) arg_list -> ('b, 'a -> 'c) arg_list
-
-    let arg ?doc name ~typ = Arg { name; doc; typ }
-
-    let arg' ?doc name ~typ ~default = DefaultArg { name; doc; typ; default }
-
-    let scalar ?doc name ~coerce = Scalar { name; doc; coerce }
-
-    let enum ?doc name ~values = Enum { name; doc; values }
-
-    let obj ?doc name ~fields ~coerce =
-      let rec o = Object { name; doc; fields = lazy (fields o); coerce } in
-      o
 
     let rec string_of_const_value : Graphql_parser.const_value -> string =
       function
@@ -404,6 +393,31 @@ module Make (Io : IO) (Field_error : Field_error) = struct
               Error
                 (Printf.sprintf "Expected enum for argument `%s` on field `%s`"
                    arg_name field_name) )
+
+    let arg ?doc name ~typ = Arg { name; doc; typ }
+
+    let arg' ?doc name ~typ ~default = DefaultArg {
+                                           name;
+                                           doc;
+                                           typ;
+                                           default = ( match
+                                                         eval_arg StringMap.empty ~field_name:"" ~arg_name:name typ
+                                                                  (Some default)
+                                                       with
+                                                       | Ok (Some v) -> v
+                                                       | Ok None
+                                                       | Error _ -> raise (Failure (Printf.sprintf "Invalid default provided for arg name=%s, default=%s" name (string_of_const_value default))) );
+                                           default_value = default
+                                         }
+
+    let scalar ?doc name ~coerce = Scalar { name; doc; coerce }
+
+    let enum ?doc name ~values = Enum { name; doc; values }
+
+    let obj ?doc name ~fields ~coerce =
+      let rec o = Object { name; doc; fields = lazy (fields o); coerce } in
+      o
+
   end
 
   (* Schema data types *)
@@ -972,7 +986,12 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                     typ = string;
                     args = Arg.[];
                     lift = Io.ok;
-                    resolve = `Resolve (fun _ (AnyArg _) -> None);
+                    resolve =
+                      `Resolve
+                        (fun _ (AnyArg arg) ->
+                          match arg with
+                          | Arg.DefaultArg a -> Some (Arg.string_of_const_value a.default_value)
+                          | Arg.Arg _ -> None);
                   };
               ];
         }
@@ -1569,13 +1588,18 @@ module Make (Io : IO) (Field_error : Field_error) = struct
       in
       type_ref_of_any_type t
 
+    and default_value_of_any_arg (AnyArg a) =
+      match a with
+      | Arg.DefaultArg a -> `String (Arg.string_of_const_value a.default_value)
+      | Arg.Arg _ -> `Null
+
     and input_value_of_any_arg a =
       `Assoc
         [
           ("name", name_of_any_arg a);
           ("description", description_of_any_arg a);
           ("type", type_of_any_arg a);
-          ("defaultValue", `Null);
+          ("defaultValue", default_value_of_any_arg a);
         ]
 
     and args_of_any_field f =
