@@ -2301,35 +2301,35 @@ module Make (Io : IO) (Field_error : Field_error) = struct
 
   let schema :
       ?mutation_name:string ->
-      ?mutations:('ctx, unit) field list ->
+      ?mutations:(('ctx, unit option) typ -> ('ctx, unit) field list) ->
       ?subscription_name:string ->
-      ?subscriptions:'ctx subscription_field list ->
+      ?subscriptions:(('ctx, unit option) typ -> 'ctx subscription_field list) ->
       ?query_name:string ->
-      ('ctx, unit) field list ->
+      (('ctx, unit option) typ -> ('ctx, unit) field list) ->
       'ctx schema =
    fun ?(mutation_name = "mutation") ?mutations
        ?(subscription_name = "subscription") ?subscriptions
        ?(query_name = "query") fields ->
-    let schema =
-      {
-        query =
-          {
+   let rec query = {
             name = query_name;
             doc = None;
             abstracts = ref [];
-            fields = lazy fields;
-          };
+            fields = lazy (fields (Object query));
+          } in
+    let schema =
+      {
+        query = query;
         mutation =
           Option.map mutations ~f:(fun fields ->
               {
                 name = mutation_name;
                 doc = None;
                 abstracts = ref [];
-                fields = lazy fields;
+                fields = lazy (fields (Object query));
               });
         subscription =
           Option.map subscriptions ~f:(fun fields ->
-              { name = subscription_name; doc = None; fields });
+              { name = subscription_name; doc = None; fields = (fields (Object query)) });
         types = [];
       }
     in

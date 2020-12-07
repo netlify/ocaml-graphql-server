@@ -74,11 +74,12 @@ module type Schema = sig
 
   val schema :
     ?mutation_name:string ->
-    ?mutations:('ctx, unit) field list ->
+    ?mutations:(('ctx, unit option) typ -> ('ctx, unit) field list) ->
     ?subscription_name:string ->
-    ?subscriptions:'ctx subscription_field list ->
+    ?subscriptions:(('ctx, unit option) typ -> 'ctx subscription_field list) ->
     ?query_name:string ->
-    ('ctx, unit) field list ->
+    (('ctx, unit option) typ -> ('ctx, unit) field list) ->
+    (* ('ctx, unit) field list -> *)
     'ctx schema
 
   type deprecated = NotDeprecated | Deprecated of string option
