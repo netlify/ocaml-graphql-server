@@ -1,3 +1,2 @@
-(lang dune 1.1)
+(lang dune 2.5)
 (using menhir 2.0)
-(using fmt 1.2)

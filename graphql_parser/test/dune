@@ -3,8 +3,8 @@
  (modules test parser_test)
  (libraries graphql_parser alcotest str))
 
-(alias
- (name runtest)
+(rule
+ (alias runtest)
  (package graphql_parser)
  (deps
   (:test test.exe))

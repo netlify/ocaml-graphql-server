@@ -13,8 +13,8 @@
  (modules test)
  (name test))
 
-(alias
- (name runtest)
+(rule
+ (alias runtest)
  (package graphql)
  (deps
   (:test test.exe))

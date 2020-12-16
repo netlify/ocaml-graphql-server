@@ -2,8 +2,8 @@
  (libraries graphql-lwt alcotest lwt.unix)
  (name lwt_test))
 
-(alias
- (name runtest)
+(rule
+ (alias runtest)
  (package graphql-lwt)
  (deps
   (:test lwt_test.exe))
