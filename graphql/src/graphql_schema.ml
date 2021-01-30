@@ -396,19 +396,27 @@ module Make (Io : IO) (Field_error : Field_error) = struct
 
     let arg ?doc name ~typ = Arg { name; doc; typ }
 
-    let arg' ?doc name ~typ ~default = DefaultArg {
-                                           name;
-                                           doc;
-                                           typ;
-                                           default = ( match
-                                                         eval_arg StringMap.empty ~field_name:"" ~arg_name:name typ
-                                                                  (Some default)
-                                                       with
-                                                       | Ok (Some v) -> v
-                                                       | Ok None
-                                                       | Error _ -> raise (Failure (Printf.sprintf "Invalid default provided for arg name=%s, default=%s" name (string_of_const_value default))) );
-                                           default_value = default
-                                         }
+    let arg' ?doc name ~typ ~default =
+      DefaultArg
+        {
+          name;
+          doc;
+          typ;
+          default =
+            ( match
+                eval_arg StringMap.empty ~field_name:"" ~arg_name:name typ
+                  (Some default)
+              with
+            | Ok (Some v) -> v
+            | Ok None | Error _ ->
+                raise
+                  (Failure
+                     (Printf.sprintf
+                        "Invalid default provided for arg name=%s, default=%s"
+                        name
+                        (string_of_const_value default))) );
+          default_value = default;
+        }
 
     let scalar ?doc name ~coerce = Scalar { name; doc; coerce }
 
