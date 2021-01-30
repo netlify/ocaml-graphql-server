@@ -402,6 +402,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
           name;
           doc;
           typ;
+          default_value = default;
           default =
             ( match
                 eval_arg StringMap.empty ~field_name:"" ~arg_name:name typ
@@ -415,7 +416,6 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                         "Invalid default provided for arg name=%s, default=%s"
                         name
                         (string_of_const_value default))) );
-          default_value = default;
         }
 
     let scalar ?doc name ~coerce = Scalar { name; doc; coerce }
@@ -425,7 +425,6 @@ module Make (Io : IO) (Field_error : Field_error) = struct
     let obj ?doc name ~fields ~coerce =
       let rec o = Object { name; doc; fields = lazy (fields o); coerce } in
       o
-
   end
 
   (* Schema data types *)
