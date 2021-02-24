@@ -1500,7 +1500,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                     typ = NonNullable (List (NonNullable __directive));
                     args = Arg.[];
                     lift = Io.ok;
-                    resolve = `Resolve (fun _ _ -> []);
+                    resolve = `Resolve (fun _ _ -> [skip_directive; include_directive]);
                   };
               ];
         }
@@ -1720,7 +1720,28 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                e.values)
       | _ -> `Null
 
-    and generate_introspection_result schema =
+    and generate_directive_result: (directive -> Yojson.Basic.json[@warning "-3"]) =
+      fun (Directive directive) ->
+        `Assoc
+          [
+            ("name", `String directive.name);
+            ("description", match directive.doc with | None -> `Null | Some doc -> `String doc);
+            ("locations", `List (List.map (fun l -> `String (match l with
+                                                    | `Query -> "QUERY"
+                                                    | `Mutation -> "MUTATION"
+                                                    | `Subscription -> "SUBSCRIPTION"
+                                                    | `Field -> "FIELD"
+                                                    | `Fragment_definition -> "FRAGMENT_DEFINITION"
+                                                    | `Fragment_spread -> "FRAGMENT_SPREAD"
+                                                    | `Inline_fragment -> "INLINE_FRAGMENT"
+                                                    | `Variable_definition -> "VARIABLE_DEFINITION"))
+                                          directive.locations));
+            ("args", `List (List.map input_value_of_any_arg (args_to_list directive.args)));
+          ]
+
+
+    and generate_introspection_result: ('ctx schema -> Yojson.Basic.json[@warning "-3"]) =
+      fun schema ->
       `Assoc
         [
           ( "__schema",
@@ -1764,9 +1785,13 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                              ("possibleTypes", possible_types_of_any_typ t);
                            ])
                        schema.types) );
-                ("directives", `List []);
+                ( "directives",
+                  `List
+                    (List.map generate_directive_result ([skip_directive; include_directive]: directive list)));
+
               ] );
         ]
+
 
     let add_built_in_fields schema types =
       let schema_field =
