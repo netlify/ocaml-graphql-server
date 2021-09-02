@@ -151,12 +151,15 @@ module type Schema = sig
 
   type fragment_map = Graphql_parser.fragment StringMap.t
 
+  type path = [ `String of string | `Int of int ] list
+
   type 'ctx resolve_info = {
     ctx : 'ctx;
     field : Graphql_parser.field;
     fragments : fragment_map;
     variables : variable_map;
     operation : Graphql_parser.operation;
+    path : path;
   }
 
   val field :

@@ -438,12 +438,15 @@ module Make (Io : IO) (Field_error : Field_error) = struct
 
   type fragment_map = Graphql_parser.fragment StringMap.t
 
+  type path = [ `String of string | `Int of int ] list
+
   type 'ctx resolve_info = {
     ctx : 'ctx;
     field : Graphql_parser.field;
     fragments : fragment_map;
     variables : variable_map;
     operation : Graphql_parser.operation;
+    path : path;
   }
 
   type ('ctx, 'src) obj = {
@@ -1853,8 +1856,6 @@ module Make (Io : IO) (Field_error : Field_error) = struct
     operation : Graphql_parser.operation;
   }
 
-  type path = [ `String of string | `Int of int ] list
-
   type error = field_error * path
 
   type resolve_error =
@@ -2054,6 +2055,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         fragments = ctx.fragments;
         variables = ctx.variables;
         operation = ctx.operation;
+        path = path';
       }
     in
     let ctx_ref = ref ctx.ctx in
@@ -2170,6 +2172,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         fragments = ctx.fragments;
         variables = ctx.variables;
         operation = ctx.operation;
+        path = path;
       }
     in
     let resolver = subs_field.resolve resolve_info in
