@@ -691,6 +691,23 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         resolve = (function true -> `Include | false -> `Skip);
       }
 
+
+  (* OneGraph/Netlify directive (noop in query executor) *)
+  let netlify_directive =
+    Directive
+      {
+        name = "netlify";
+        doc =
+          Some
+            "An internal directive used by Netlify Graph";
+        locations = [ `Query; `Mutation; `Subscription; `Fragment_definition];
+        args = Arg.[
+                      arg "id" ~doc:"The uuid of the operation (normally auto-generated)" ~typ:(non_null string);
+                      arg "doc" ~doc:"The docstring for this operation" ~typ:string;
+                    ];
+        resolve = (fun _id _doc -> `Include);
+      }
+
   module Introspection = struct
     (* any_typ, any_field and any_arg hide type parameters to avoid scope escaping errors *)
     type any_field =
@@ -1503,7 +1520,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                     typ = NonNullable (List (NonNullable __directive));
                     args = Arg.[];
                     lift = Io.ok;
-                    resolve = `Resolve (fun _ _ -> [skip_directive; include_directive]);
+                    resolve = `Resolve (fun _ _ -> [skip_directive; include_directive; netlify_directive]);
                   };
               ];
         }
@@ -1790,7 +1807,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                        schema.types) );
                 ( "directives",
                   `List
-                    (List.map generate_directive_result ([skip_directive; include_directive]: directive list)));
+                    (List.map generate_directive_result ([skip_directive; include_directive; netlify_directive]: directive list)));
 
               ] );
         ]
@@ -1887,6 +1904,8 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         eval_directive ctx skip_directive arguments rest
     | { name = "include"; arguments } :: rest ->
         eval_directive ctx include_directive arguments rest
+    | { name = "netlify"; arguments } :: rest ->
+        eval_directive ctx netlify_directive arguments rest
     | { name; _ } :: _ ->
         let err = Format.sprintf "Unknown directive: %s" name in
         Error err
