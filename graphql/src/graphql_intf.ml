@@ -70,6 +70,20 @@ module type Schema = sig
 
   type 'a enum_value
 
+  type directive_location =
+    [ `Query
+    | `Mutation
+    | `Subscription
+    | `Field
+    | `Fragment_definition
+    | `Fragment_spread
+    | `Inline_fragment
+    | `Variable_definition ]
+
+  type directive_resolve = [ `Skip | `Include ]
+
+  type directive
+
   (** {3 Constructors } *)
 
   val schema :
@@ -78,6 +92,7 @@ module type Schema = sig
     ?subscription_name:string ->
     ?subscriptions:(('ctx, unit option) typ -> 'ctx subscription_field list) ->
     ?query_name:string ->
+    ?directives:directive list ->
     (('ctx, unit option) typ -> ('ctx, unit) field list) ->
     (* ('ctx, unit) field list -> *)
     'ctx schema
@@ -197,6 +212,14 @@ module type Schema = sig
     args:(('out Io.Stream.t, field_error) result Io.t, 'args) Arg.arg_list ->
     resolve:('ctx resolve_info -> 'args) ->
     'ctx subscription_field
+
+  val directive :
+    ?doc: string ->
+    string ->
+    locations:(directive_location list) ->
+    args:(directive_resolve, 'a) Arg.arg_list ->
+    resolve:'a ->
+    directive
 
   val enum :
     ?doc:string -> string -> values:'a enum_value list -> ('ctx, 'a option) typ

@@ -527,12 +527,14 @@ module Make (Io : IO) (Field_error : Field_error) = struct
     | `Inline_fragment
     | `Variable_definition ]
 
+  type directive_resolve = [ `Skip | `Include ]
+
   type directive =
     | Directive : {
         name : string;
         doc : string option;
         locations : directive_location list;
-        args : ([ `Skip | `Include ], 'args) Arg.arg_list;
+        args : (directive_resolve, 'args) Arg.arg_list;
         resolve : 'args;
       }
         -> directive
@@ -542,6 +544,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
     mutation : ('ctx, unit) obj option;
     subscription : 'ctx subscription_obj option;
     types : any_typ list;
+    directives: directive list;
   }
 
   (* Constructor functions *)
@@ -604,6 +607,9 @@ module Make (Io : IO) (Field_error : Field_error) = struct
   let subscription_field ?doc ?(deprecated = NotDeprecated) name ~typ ~args
       ~resolve =
     SubscriptionField { name; doc; deprecated; typ; args; resolve }
+
+  let directive ?doc name ~locations ~args ~resolve =
+    Directive { name; doc; locations; args; resolve }
 
   let enum ?doc name ~values = Enum { name; doc; values }
 
@@ -689,23 +695,6 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         locations = [ `Field; `Fragment_spread; `Inline_fragment ];
         args = Arg.[ arg "if" ~doc:"Included when true." ~typ:(non_null bool) ];
         resolve = (function true -> `Include | false -> `Skip);
-      }
-
-
-  (* OneGraph/Netlify directive (noop in query executor) *)
-  let netlify_directive =
-    Directive
-      {
-        name = "netlify";
-        doc =
-          Some
-            "An internal directive used by Netlify Graph";
-        locations = [ `Query; `Mutation; `Subscription; `Fragment_definition];
-        args = Arg.[
-                      arg "id" ~doc:"The uuid of the operation (normally auto-generated)" ~typ:(non_null string);
-                      arg "doc" ~doc:"The docstring for this operation" ~typ:string;
-                    ];
-        resolve = (fun _id _doc -> `Include);
       }
 
   module Introspection = struct
@@ -1520,7 +1509,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                     typ = NonNullable (List (NonNullable __directive));
                     args = Arg.[];
                     lift = Io.ok;
-                    resolve = `Resolve (fun _ _ -> [skip_directive; include_directive; netlify_directive]);
+                    resolve = `Resolve (fun _ (schema, _types) -> schema.directives);
                   };
               ];
         }
@@ -1807,7 +1796,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                        schema.types) );
                 ( "directives",
                   `List
-                    (List.map generate_directive_result ([skip_directive; include_directive; netlify_directive]: directive list)));
+                    (List.map generate_directive_result (schema.directives: directive list)));
 
               ] );
         ]
@@ -1896,28 +1885,26 @@ module Make (Io : IO) (Field_error : Field_error) = struct
          (fun (abstract : abstract) -> abstract.name = type_condition)
          !(obj.abstracts)
 
-  let rec should_include_field ctx (directives : Graphql_parser.directive list)
+  let rec should_include_field schema ctx (directives : Graphql_parser.directive list)
       =
     match directives with
     | [] -> Ok true
-    | { name = "skip"; arguments } :: rest ->
-        eval_directive ctx skip_directive arguments rest
-    | { name = "include"; arguments } :: rest ->
-        eval_directive ctx include_directive arguments rest
-    | { name = "netlify"; arguments } :: rest ->
-        eval_directive ctx netlify_directive arguments rest
-    | { name; _ } :: _ ->
-        let err = Format.sprintf "Unknown directive: %s" name in
-        Error err
+    | { name; arguments } :: rest ->
+        match (List.find_opt (fun (Directive(d): directive) -> d.name = name) schema.directives) with
+        | Some schema_directive ->
+          eval_directive schema ctx schema_directive arguments rest
+        | None ->
+          let err = Format.sprintf "Unknown directive: %s" name in
+          Error err
 
-  and eval_directive ctx (Directive { name; args; resolve; _ }) arguments rest
+  and eval_directive schema ctx (Directive { name; args; resolve; _ }) arguments rest
       =
     let open Rresult in
     Arg.eval_arglist ctx.variables ~field_type:"directive" ~field_name:name
       args arguments resolve
     >>= function
     | `Skip -> Ok false
-    | `Include -> should_include_field ctx rest
+    | `Include -> should_include_field schema ctx rest
 
   let alias_or_name : Graphql_parser.field -> string =
    fun field ->
@@ -1939,23 +1926,24 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         merge_selections ~memo:({ field with selection_set } :: memo) rest
 
   let rec collect_fields :
+      'ctx schema ->
       'ctx execution_context ->
       ('ctx, 'src) obj ->
       Graphql_parser.selection list ->
       (Graphql_parser.field list, string) result =
-   fun ctx obj fields ->
+   fun schema ctx obj fields ->
     let open Rresult in
     List.map
       (function
         | Graphql_parser.Field field ->
-            should_include_field ctx field.directives >>| fun include_field ->
+            should_include_field schema ctx field.directives >>| fun include_field ->
             if include_field then [ field ] else []
         | Graphql_parser.FragmentSpread spread -> (
             match StringMap.find spread.name ctx.fragments with
             | Some { type_condition; selection_set; _ }
               when matches_type_condition type_condition obj ->
-                should_include_field ctx spread.directives >>= fun include_field ->
-                if include_field then collect_fields ctx obj selection_set
+                should_include_field schema ctx spread.directives >>= fun include_field ->
+                if include_field then collect_fields schema ctx obj selection_set
                 else Ok []
             | _ -> Ok [] )
         | Graphql_parser.InlineFragment fragment ->
@@ -1965,10 +1953,10 @@ module Make (Io : IO) (Field_error : Field_error) = struct
               | Some condition -> matches_type_condition condition obj
             in
             if matches_type_condition then
-              should_include_field ctx fragment.directives
+              should_include_field schema ctx fragment.directives
               >>= fun include_field ->
               if include_field then
-                collect_fields ctx obj fragment.selection_set
+                collect_fields schema ctx obj fragment.selection_set
               else Ok []
             else Ok [])
       fields
@@ -2021,28 +2009,29 @@ module Make (Io : IO) (Field_error : Field_error) = struct
 
   let rec present :
       type ctx src.
+      ctx schema ->
       ctx execution_context ->
       src ->
       Graphql_parser.field ->
       (ctx, src) typ ->
       path ->
       (json * error list, [> resolve_error ]) result Io.t =
-   fun ctx src query_field typ path ->
+   fun schema ctx src query_field typ path ->
     match typ with
     | Scalar s -> coerce_or_null src (fun x -> Io.ok (s.coerce x, []))
     | List t ->
         coerce_or_null src (fun src' ->
             List.mapi
-              (fun i x -> present ctx x query_field t (`Int i :: path))
+              (fun i x -> present schema ctx x query_field t (`Int i :: path))
               src'
             |> Io.all |> Io.map ~f:List.Result.join
             |> Io.Result.map ~f:(fun xs ->
                    (`List (List.map fst xs), List.map snd xs |> List.concat)))
-    | NonNullable t -> present ctx (Some src) query_field t path
+    | NonNullable t -> present schema ctx (Some src) query_field t path
     | Object o ->
         coerce_or_null src (fun src' ->
-            match collect_fields ctx o query_field.selection_set with
-            | Ok fields -> resolve_fields ctx src' o fields path
+            match collect_fields schema ctx o query_field.selection_set with
+            | Ok fields -> resolve_fields schema ctx src' o fields path
             | Error e -> Io.error (`Argument_error e))
     | Enum e ->
         coerce_or_null src (fun src' ->
@@ -2053,17 +2042,18 @@ module Make (Io : IO) (Field_error : Field_error) = struct
             | None -> Io.ok (`Null, []))
     | Abstract _ ->
         coerce_or_null src (fun (AbstractValue (typ', src')) ->
-            present ctx (Some src') query_field typ' path)
+            present schema ctx (Some src') query_field typ' path)
 
   and resolve_field :
       type ctx src.
+      ctx schema ->
       ctx execution_context ->
       src ->
       Graphql_parser.field ->
       (ctx, src) field ->
       path ->
       ((string * json) * error list, [> resolve_error ]) result Io.t =
-   fun ctx src query_field (Field field) path ->
+   fun schema ctx src query_field (Field field) path ->
     let open Io.Infix in
     let name = alias_or_name query_field in
     let path' = `String name :: path in
@@ -2099,6 +2089,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
           |> Io.Result.map_error ~f:(fun err -> `Resolve_error (err, path'))
           >>=? fun resolved ->
           present
+            schema
             { ctx with ctx = !ctx_ref }
             resolved query_field field.typ path'
         in
@@ -2114,6 +2105,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
 
   and resolve_fields :
       type ctx src.
+      ctx schema ->
       ctx execution_context ->
       ?execution_order:execution_order ->
       src ->
@@ -2121,7 +2113,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
       Graphql_parser.field list ->
       path ->
       (json * error list, [> resolve_error ]) result Io.t =
-   fun ctx ?(execution_order = Parallel) src obj fields path ->
+   fun schema ctx ?(execution_order = Parallel) src obj fields path ->
     map_fields_with_order execution_order
       (fun (query_field : Graphql_parser.field) ->
         let name = alias_or_name query_field in
@@ -2129,7 +2121,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
           Io.ok ((name, `String obj.name), [])
         else
           match field_from_object obj query_field.name with
-          | Some field -> resolve_field ctx src query_field field path
+          | Some field -> resolve_field schema ctx src query_field field path
           | None ->
               let err =
                 Printf.sprintf "Field '%s' is not defined on type '%s'"
@@ -2176,11 +2168,12 @@ module Make (Io : IO) (Field_error : Field_error) = struct
 
   let subscribe :
       type ctx.
+      ctx schema ->
       ctx execution_context ->
       ctx subscription_field ->
       Graphql_parser.field ->
       (json response Io.Stream.t, [> resolve_error ]) result Io.t =
-   fun ctx (SubscriptionField subs_field) field ->
+   fun schema ctx (SubscriptionField subs_field) field ->
     let open Io.Infix in
     let name = alias_or_name field in
     let path = [ `String name ] in
@@ -2203,7 +2196,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         result
         |> Io.Result.map ~f:(fun source_stream ->
                Io.Stream.map source_stream (fun value ->
-                   present ctx value field subs_field.typ path
+                   present schema ctx value field subs_field.typ path
                    |> Io.Result.map ~f:(fun (data, errors) ->
                           data_to_json (`Assoc [ (name, data) ], errors))
                    >>| to_response))
@@ -2223,10 +2216,10 @@ module Make (Io : IO) (Field_error : Field_error) = struct
     match operation.optype with
     | Graphql_parser.Query ->
         let query = schema.query in
-        Io.return (collect_fields ctx query operation.selection_set)
+        Io.return (collect_fields schema ctx query operation.selection_set)
         |> Io.Result.map_error ~f:(fun e -> `Argument_error e)
         >>=? fun fields ->
-        ( resolve_fields ctx () query fields []
+        ( resolve_fields schema ctx () query fields []
           : (json * error list, resolve_error) result Io.t
           :> (json * error list, [> execute_error ]) result Io.t )
         |> Io.Result.map ~f:(fun data_errs ->
@@ -2235,10 +2228,10 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         match schema.mutation with
         | None -> Io.error `Mutations_not_configured
         | Some mut ->
-            Io.return (collect_fields ctx mut operation.selection_set)
+            Io.return (collect_fields schema ctx mut operation.selection_set)
             |> Io.Result.map_error ~f:(fun e -> `Argument_error e)
             >>=? fun fields ->
-            ( resolve_fields ~execution_order:Serial ctx () mut fields []
+            ( resolve_fields ~execution_order:Serial schema ctx () mut fields []
               : (json * error list, resolve_error) result Io.t
               :> (json * error list, [> execute_error ]) result Io.t )
             |> Io.Result.map ~f:(fun data_errs ->
@@ -2248,7 +2241,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         | None -> Io.error `Subscriptions_not_configured
         | Some subs -> (
             Io.return
-              (collect_fields ctx
+              (collect_fields schema ctx
                  (obj_of_subscription_obj subs)
                  operation.selection_set)
             |> Io.Result.map_error ~f:(fun e -> `Argument_error e)
@@ -2263,7 +2256,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
                 else
                   match field_from_subscription_object subs field.name with
                   | Some subscription_field ->
-                      ( subscribe ctx subscription_field field
+                      ( subscribe schema ctx subscription_field field
                         : ( (json, json) result Io.Stream.t,
                             resolve_error )
                           result
@@ -2359,11 +2352,12 @@ module Make (Io : IO) (Field_error : Field_error) = struct
       ?subscription_name:string ->
       ?subscriptions:(('ctx, unit option) typ -> 'ctx subscription_field list) ->
       ?query_name:string ->
+      ?directives:(directive list) ->
       (('ctx, unit option) typ -> ('ctx, unit) field list) ->
       'ctx schema =
    fun ?(mutation_name = "mutation") ?mutations
        ?(subscription_name = "subscription") ?subscriptions
-       ?(query_name = "query") fields ->
+       ?(query_name = "query") ?(directives = []) fields ->
    let rec query = {
             name = query_name;
             doc = None;
@@ -2384,6 +2378,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         subscription =
           Option.map subscriptions ~f:(fun fields ->
               { name = subscription_name; doc = None; fields = (fields (Object query)) });
+        directives = directives @ [skip_directive; include_directive];
         types = [];
       }
     in
