@@ -793,7 +793,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
           arg_list_types memo' args
 
     let types_of_schema s =
-      let types, _ =
+      let types, memo =
         List.fold_left
           (fun memo op ->
             match op with None -> memo | Some op -> types ~memo (Object op))
@@ -803,6 +803,9 @@ module Make (Io : IO) (Field_error : Field_error) = struct
             s.mutation;
             Option.map s.subscription ~f:obj_of_subscription_obj;
           ]
+      in
+      let types, _ = List.fold_left (fun memo (Directive { args;_ }) ->
+        arg_list_types memo args) (types, memo) s.directives
       in
       types
 
