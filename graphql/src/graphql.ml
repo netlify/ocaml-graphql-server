@@ -18,6 +18,7 @@ module Schema =
       end
     end)
     (struct
+      type +'a io = 'a
       type t = string
 
       let message_of_field_error t = t
