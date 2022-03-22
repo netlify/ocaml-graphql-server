@@ -17,7 +17,7 @@ module Schema =
       type +'a io = 'a Lwt.t
       type t = string
 
-      let message_of_field_error t = t
+      let message_of_field_error t = Lwt.return t
 
       let extensions_of_field_error _t = Lwt.return None
     end)

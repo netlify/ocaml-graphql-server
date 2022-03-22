@@ -52,7 +52,7 @@ module type Field_error = sig
   type +'a io
   type t
 
-  val message_of_field_error : t -> string
+  val message_of_field_error : t -> string io
 
   val extensions_of_field_error :
     t -> ((string * Yojson.Basic.json)[@warning "-3"]) list option io
@@ -2146,8 +2146,8 @@ module Make (Io : IO) (Field_error : Field_error with type 'a io = 'a Io.t) = st
       Io.all
         (List.map
           (fun (field_error, path) ->
-            Field_error.extensions_of_field_error field_error >>| fun extensions ->
-            let msg = Field_error.message_of_field_error field_error in
+            Field_error.extensions_of_field_error field_error >>= fun extensions ->
+            Field_error.message_of_field_error field_error >>| fun msg ->
             error_to_json ~path ?extensions msg)
           errors)
       >>| fun errors ->
@@ -2170,8 +2170,8 @@ module Make (Io : IO) (Field_error : Field_error with type 'a io = 'a Io.t) = st
     | Error (`Argument_error msg) -> Io.return (Error (error_response ~data:`Null msg))
     | Error (`Resolve_error (field_error, path)) ->
         let open Io.Infix in
-        Field_error.extensions_of_field_error field_error >>| fun extensions ->
-        let msg = Field_error.message_of_field_error field_error in
+        Field_error.extensions_of_field_error field_error >>= fun extensions ->
+        Field_error.message_of_field_error field_error >>| fun msg ->
         Error (error_response ~data:`Null ~path ?extensions msg)
 
   let subscribe :

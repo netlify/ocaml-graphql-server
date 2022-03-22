@@ -36,7 +36,7 @@ module type Field_error = sig
   type +'a io
   type t
 
-  val message_of_field_error : t -> string
+  val message_of_field_error : t -> string io
 
   val extensions_of_field_error :
     t -> ((string * Yojson.Basic.json)[@warning "-3"]) list option io
