@@ -49,16 +49,17 @@ end
 
 (* Field_error *)
 module type Field_error = sig
+  type +'a io
   type t
 
-  val message_of_field_error : t -> string
+  val message_of_field_error : t -> string io
 
   val extensions_of_field_error :
-    t -> ((string * Yojson.Basic.json)[@warning "-3"]) list option
+    t -> ((string * Yojson.Basic.json)[@warning "-3"]) list option io
 end
 
 (* Schema *)
-module Make (Io : IO) (Field_error : Field_error) = struct
+module Make (Io : IO) (Field_error : Field_error with type 'a io = 'a Io.t) = struct
   module Io = struct
     include Io
 
@@ -73,7 +74,7 @@ module Make (Io : IO) (Field_error : Field_error) = struct
       | x :: xs -> bind (all xs) (fun xs' -> map x ~f:(fun x' -> x' :: xs'))
 
     module Result = struct
-      let bind x f =
+      let bind x ~f =
         bind x (function Ok x' -> f x' | Error _ as err -> Io.return err)
 
       let map_error x ~f =
@@ -91,8 +92,9 @@ module Make (Io : IO) (Field_error : Field_error) = struct
 
     module Infix = struct
       let ( >>| ) x f = map x ~f
+      let ( >>= ) = bind
 
-      let ( >>=? ) = Result.bind
+      let ( >>=? ) x f = Result.bind x ~f
     end
   end
 
@@ -2136,37 +2138,40 @@ module Make (Io : IO) (Field_error : Field_error) = struct
     |> Io.Result.map ~f:(fun xs ->
            (`Assoc (List.map fst xs), List.map snd xs |> List.concat))
 
-  let data_to_json = function
-    | data, [] -> `Assoc [ ("data", data) ]
+  let data_to_json data =
+    match data with
+    | data, [] -> Io.return (`Assoc [ ("data", data) ])
     | data, errors ->
-        let errors =
-          List.map
-            (fun (field_error, path) ->
-              let extensions =
-                Field_error.extensions_of_field_error field_error
-              in
-              let msg = Field_error.message_of_field_error field_error in
-              error_to_json ~path ?extensions msg)
-            errors
-        in
-        `Assoc [ ("errors", `List errors); ("data", data) ]
+      let open Io.Infix in
+      Io.all
+        (List.map
+          (fun (field_error, path) ->
+            Field_error.extensions_of_field_error field_error >>= fun extensions ->
+            Field_error.message_of_field_error field_error >>| fun msg ->
+            error_to_json ~path ?extensions msg)
+          errors)
+      >>| fun errors ->
+            `Assoc [ ("errors", `List errors); ("data", data) ]
 
-  let to_response = function
-    | Ok _ as res -> res
-    | Error `No_operation_found -> Error (error_response "No operation found")
+  let to_response res =
+    match res with
+    | Ok _ as res -> Io.return res
+    | Error `No_operation_found ->
+      Io.return (Error (error_response "No operation found"))
     | Error `Operation_not_found ->
-        Error (error_response "Operation not found")
+      Io.return (Error (error_response "Operation not found"))
     | Error `Operation_name_required ->
-        Error (error_response "Operation name required")
+      Io.return (Error (error_response "Operation name required"))
     | Error `Subscriptions_not_configured ->
-        Error (error_response "Subscriptions not configured")
+      Io.return (Error (error_response "Subscriptions not configured"))
     | Error `Mutations_not_configured ->
-        Error (error_response "Mutations not configured")
-    | Error (`Validation_error msg) -> Error (error_response msg)
-    | Error (`Argument_error msg) -> Error (error_response ~data:`Null msg)
+      Io.return (Error (error_response "Mutations not configured"))
+    | Error (`Validation_error msg) -> Io.return (Error (error_response msg))
+    | Error (`Argument_error msg) -> Io.return (Error (error_response ~data:`Null msg))
     | Error (`Resolve_error (field_error, path)) ->
-        let extensions = Field_error.extensions_of_field_error field_error in
-        let msg = Field_error.message_of_field_error field_error in
+        let open Io.Infix in
+        Field_error.extensions_of_field_error field_error >>= fun extensions ->
+        Field_error.message_of_field_error field_error >>| fun msg ->
         Error (error_response ~data:`Null ~path ?extensions msg)
 
   let subscribe :
@@ -2196,13 +2201,13 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         subs_field.args field.arguments resolver
     with
     | Ok result ->
-        result
-        |> Io.Result.map ~f:(fun source_stream ->
-               Io.Stream.map source_stream (fun value ->
-                   present schema ctx value field subs_field.typ path
-                   |> Io.Result.map ~f:(fun (data, errors) ->
-                          data_to_json (`Assoc [ (name, data) ], errors))
-                   >>| to_response))
+        Io.Result.map result ~f:(fun source_stream ->
+           Io.Stream.map source_stream (fun value ->
+               present schema ctx value field subs_field.typ path
+               |> Io.Result.bind ~f:(fun (data, errors) ->
+                      data_to_json (`Assoc [ (name, data) ], errors)
+                      >>| fun data -> Ok data)
+               >>= to_response))
         |> Io.Result.map_error ~f:(fun err -> `Resolve_error (err, path))
     | Error err -> Io.error (`Argument_error err)
 
@@ -2225,8 +2230,9 @@ module Make (Io : IO) (Field_error : Field_error) = struct
         ( resolve_fields schema ctx () query fields []
           : (json * error list, resolve_error) result Io.t
           :> (json * error list, [> execute_error ]) result Io.t )
-        |> Io.Result.map ~f:(fun data_errs ->
-               `Response (data_to_json data_errs))
+        |> Io.Result.bind ~f:(fun data_errs ->
+              data_to_json data_errs >>| fun data ->
+               Ok (`Response data))
     | Graphql_parser.Mutation -> (
         match schema.mutation with
         | None -> Io.error `Mutations_not_configured
@@ -2237,8 +2243,9 @@ module Make (Io : IO) (Field_error : Field_error) = struct
             ( resolve_fields ~execution_order:Serial schema ctx () mut fields []
               : (json * error list, resolve_error) result Io.t
               :> (json * error list, [> execute_error ]) result Io.t )
-            |> Io.Result.map ~f:(fun data_errs ->
-                   `Response (data_to_json data_errs)) )
+            |> Io.Result.bind ~f:(fun data_errs ->
+                   data_to_json data_errs >>| fun data ->
+                   Ok (`Response data)) )
     | Graphql_parser.Subscription -> (
         match schema.subscription with
         | None -> Io.error `Subscriptions_not_configured
@@ -2252,10 +2259,8 @@ module Make (Io : IO) (Field_error : Field_error) = struct
             match fields with
             | [ field ] -> (
                 if field.name = "__typename" then
-                  Io.ok
-                    (`Response
-                      (data_to_json
-                         (`Assoc [ (field.name, `String subs.name) ], [])))
+                  data_to_json (`Assoc [ (field.name, `String subs.name) ], [])
+                  >>| fun data -> Ok (`Response data)
                 else
                   match field_from_subscription_object subs field.name with
                   | Some subscription_field ->
@@ -2409,5 +2414,5 @@ module Make (Io : IO) (Field_error : Field_error) = struct
       let execution_ctx = { fragments; ctx; variables; operation = op } in
       execute_operation schema execution_ctx op
     in
-    execute' schema ctx doc >>| to_response
+    execute' schema ctx doc >>= to_response
 end
