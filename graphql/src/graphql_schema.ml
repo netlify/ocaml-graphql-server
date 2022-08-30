@@ -55,7 +55,7 @@ module type Field_error = sig
   val message_of_field_error : t -> string io
 
   val extensions_of_field_error :
-    t -> ((string * Yojson.Basic.json)[@warning "-3"]) list option io
+    t -> ((string * Yojson.Basic.t)) list option io
 end
 
 (* Schema *)
@@ -124,7 +124,7 @@ module Make (Io : IO) (Field_error : Field_error with type 'a io = 'a Io.t) = st
     value : 'a;
   }
 
-  type json = (Yojson.Basic.json[@warning "-3"])
+  type json = (Yojson.Basic.t)
 
   let enum_value ?doc ?(deprecated = NotDeprecated) name ~value =
     { name; doc; deprecated; value }
@@ -1734,7 +1734,7 @@ module Make (Io : IO) (Field_error : Field_error with type 'a io = 'a Io.t) = st
                e.values)
       | _ -> `Null
 
-    and generate_directive_result: (directive -> Yojson.Basic.json[@warning "-3"]) =
+    and generate_directive_result: (directive -> Yojson.Basic.t) =
       fun (Directive directive) ->
         `Assoc
           [
@@ -1754,7 +1754,7 @@ module Make (Io : IO) (Field_error : Field_error with type 'a io = 'a Io.t) = st
           ]
 
 
-    and generate_introspection_result: ('ctx schema -> Yojson.Basic.json[@warning "-3"]) =
+    and generate_introspection_result: ('ctx schema -> Yojson.Basic.t) =
       fun schema ->
       `Assoc
         [

@@ -39,7 +39,7 @@ module type Field_error = sig
   val message_of_field_error : t -> string io
 
   val extensions_of_field_error :
-    t -> ((string * Yojson.Basic.json)[@warning "-3"]) list option io
+    t -> ((string * Yojson.Basic.t)) list option io
 end
 
 (** GraphQL schema signature *)
@@ -228,8 +228,8 @@ module type Schema = sig
   val scalar :
     (?doc:string ->
      string ->
-     coerce:('a -> Yojson.Basic.json) ->
-     ('ctx, 'a option) typ[@warning "-3"])
+     coerce:('a -> Yojson.Basic.t) ->
+     ('ctx, 'a option) typ)
 
   val list : ('ctx, 'src) typ -> ('ctx, 'src list option) typ
 
@@ -277,7 +277,7 @@ module type Schema = sig
 
   type variables = (string * Graphql_parser.const_value) list
 
-  type 'a response = (('a, Yojson.Basic.json) result[@warning "-3"])
+  type 'a response = (('a, Yojson.Basic.t) result)
 
   val execute :
     ('ctx schema ->
@@ -285,12 +285,12 @@ module type Schema = sig
      ?variables:variables ->
      ?operation_name:string ->
      Graphql_parser.document ->
-     [ `Response of Yojson.Basic.json
-     | `Stream of Yojson.Basic.json response Io.Stream.t ]
+     [ `Response of Yojson.Basic.t
+     | `Stream of Yojson.Basic.t response Io.Stream.t ]
      response
      Io.t[@warning "-3"])
   (** [execute schema ctx variables doc] evaluates the [doc] against [schema]
       with the given context [ctx] and [variables]. *)
 
-  val introspection_result : ('ctx schema -> Yojson.Basic.json[@warning "-3"])
+  val introspection_result : ('ctx schema -> Yojson.Basic.t)
 end
