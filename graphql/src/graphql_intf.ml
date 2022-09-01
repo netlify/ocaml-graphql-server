@@ -161,6 +161,13 @@ module type Schema = sig
     val list : 'a arg_typ -> 'a list option arg_typ
 
     val non_null : 'a option arg_typ -> 'a arg_typ
+
+   val eval_arglist : 'a 'b.
+    Graphql_parser.const_value StringMap.t ->
+      ?field_type:string ->
+      field_name:string ->
+      ('a, 'b) arg_list ->
+      (string * Graphql_parser.value) list -> 'b -> ('a, string) result
   end
 
   type variable_map = Graphql_parser.const_value StringMap.t
